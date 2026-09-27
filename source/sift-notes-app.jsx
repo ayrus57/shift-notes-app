@@ -7,7 +7,7 @@ import {
   Clock, Minus, Crosshair, Compass, Archive, ArchiveRestore, Flame, ChevronDown, ChevronUp,
   ChevronRight, User, UserPlus, Gauge, Repeat, CalendarClock, ArrowUpDown, Layers, Flag, Cloud,
   Siren, ArrowUp, ArrowDown, Rows, Columns, Paperclip, Upload,
-  Heading1, Heading2, Bold, Italic, List, Quote, Code, Link as LinkIcon, Eye, EyeOff, Info, Copy,
+  Heading1, Heading2, Bold, Italic, List, Quote, Code, Link as LinkIcon, Eye, EyeOff, Info, Copy, Undo2,
 } from "lucide-react";
 
 /* ---------------- tokens ---------------- */
@@ -1531,11 +1531,45 @@ export default function ShiftApp() {
   const upd = (f) => setEditor((p) => (p ? { ...p, ...f } : p));
   const [activeMore, setActiveMore] = useState(null); // which popover (reminder/label/people/places/dates/images/attachments) is open, if any
   const [moreExpanded, setMoreExpanded] = useState(false);
+  // Undo for the description and extra-description fields. Each stack holds the field's
+  // earlier values; edits that land within UNDO_GROUP_MS of the previous one join the same
+  // step, so one Undo takes back a word or phrase rather than a single letter. Changes are
+  // picked up by watching the field values (not the inputs), so toolbar buttons, line
+  // merges and cross-line deletes in the extra editor are all undoable too.
+  const UNDO_GROUP_MS = 800;
+  const [undoHist, setUndoHist] = useState({ content: [], extra: [] });
+  const undoSeenRef = useRef(null); // last values seen; null = take a fresh baseline
+  const [undoEpoch, setUndoEpoch] = useState(0); // bumped when a note is opened, to re-baseline
+  useEffect(() => {
+    if (!editor) return;
+    const cur = { content: editor.content || "", extra: editor.extra || "" };
+    const seen = undoSeenRef.current;
+    if (!seen) { undoSeenRef.current = { ...cur, at: {}, skip: {} }; return; }
+    ["content", "extra"].forEach((f) => {
+      if (cur[f] === seen[f]) return;
+      const before = seen[f];
+      seen[f] = cur[f];
+      if (seen.skip[f]) { seen.skip[f] = false; return; } // this change was the undo itself
+      const now = Date.now();
+      const joins = now - (seen.at[f] || 0) < UNDO_GROUP_MS;
+      seen.at[f] = now;
+      setUndoHist((h) => (joins && h[f].length ? h : { ...h, [f]: [...h[f].slice(-99), before] }));
+    });
+  }, [editor && editor.content, editor && editor.extra, undoEpoch]);
+  const undoField = (f) => {
+    const stack = undoHist[f];
+    if (!stack.length) return;
+    setUndoHist((h) => ({ ...h, [f]: h[f].slice(0, -1) }));
+    if (undoSeenRef.current) { undoSeenRef.current.skip[f] = true; undoSeenRef.current.at[f] = 0; }
+    if (f === "extra") setExtraLineSel(null);
+    upd({ [f]: stack[stack.length - 1] });
+  };
   const resetAux = () => {
     setLabelOpen(false); setLabelQuery(""); setBusy({}); setMapOpen(false);
     setExtraOpen(false); setContactQuery(""); setTab("filing"); setRelationsOpen(false);
     setActiveMore(null);
     setMoreExpanded(false);
+    setUndoHist({ content: [], extra: [] }); undoSeenRef.current = null; setUndoEpoch((x) => x + 1);
   };
   const openNew = () => {
     setEditor({ id: null, title: "", content: "", extra: "", labels: [], contacts: [], assignees: [],
@@ -4105,8 +4139,15 @@ export default function ShiftApp() {
                   </div>
                 )}
 
-                <textarea ref={contentRef} style={{ ...st.contentIn, ...rtl(editor.content) }} placeholder="Take a note…"
-                  value={editor.content} onChange={(e) => upd({ content: e.target.value })} />
+                <div style={{ position: "relative", display: "flex", flexDirection: "column" }}>
+                  <textarea ref={contentRef} style={{ ...st.contentIn, ...rtl(editor.content), paddingBottom: 30 }} placeholder="Take a note…"
+                    value={editor.content} onChange={(e) => upd({ content: e.target.value })} />
+                  <button style={{ ...st.undoBtn, position: "absolute", right: 18, bottom: 6, ...(undoHist.content.length ? {} : st.undoBtnOff) }}
+                    title="Undo" disabled={!undoHist.content.length}
+                    onMouseDown={(e) => e.preventDefault()} onClick={() => undoField("content")}>
+                    <Undo2 size={12} /> Undo
+                  </button>
+                </div>
 
                 {/* extra description — one box: rendered by default, click to edit, toolbar buttons instead of typed syntax. Lives above the tabs. */}
                 <div>
@@ -4140,6 +4181,11 @@ export default function ShiftApp() {
                           <button style={st.mdBtn} title="Code" onMouseDown={(e) => e.preventDefault()} onClick={() => extraWrapSelection("`")}><Code size={13} /></button>
                           <button style={st.mdBtn} title="Link" onMouseDown={(e) => e.preventDefault()} onClick={extraInsertLink}><LinkIcon size={13} /></button>
                           <button style={st.mdBtn} title="Divider" onMouseDown={(e) => e.preventDefault()} onClick={extraInsertDivider}><Minus size={13} /></button>
+                          <button style={{ ...st.undoBtn, marginLeft: "auto", ...(undoHist.extra.length ? {} : st.undoBtnOff) }}
+                            title="Undo" disabled={!undoHist.extra.length}
+                            onMouseDown={(e) => e.preventDefault()} onClick={() => undoField("extra")}>
+                            <Undo2 size={12} /> Undo
+                          </button>
                         </div>
                         <div
                           style={{ ...st.teachIn, ...rtl(editor.extra), marginTop: 6, width: "100%", minHeight: 220,
@@ -5156,6 +5202,9 @@ const st = {
     border: `1px solid ${C.line}`, borderRadius: 8, background: "transparent", color: C.dim, cursor: "pointer", flexShrink: 0 },
   mdBtn: { display: "flex", alignItems: "center", justifyContent: "center", width: 26, height: 26,
     border: `1px solid ${C.line}`, borderRadius: 6, background: C.raised, color: C.dim, cursor: "pointer" },
+  undoBtn: { display: "flex", alignItems: "center", gap: 4, height: 26, padding: "0 8px", fontSize: 11.5,
+    border: `1px solid ${C.line}`, borderRadius: 6, background: C.raised, color: C.dim, cursor: "pointer", fontFamily: "inherit" },
+  undoBtnOff: { opacity: 0.4, cursor: "default" },
   moreIconRow: { display: "flex", gap: 4, flexWrap: "wrap", margin: "2px 0 4px" },
   morePopover: { position: "absolute", top: "calc(100% + 4px)", left: 0, zIndex: 20, minWidth: 240, maxWidth: 320,
     maxHeight: 280, overflowY: "auto", background: C.raised, border: `1px solid ${C.line}`, borderRadius: 10,
