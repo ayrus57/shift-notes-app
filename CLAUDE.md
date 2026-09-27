@@ -59,11 +59,29 @@ createRoot(document.getElementById("root")).render(<ShiftApp />);
    `re.compile(r'(<script type="module">).*?(</script>)', re.DOTALL)` and
    `pattern.subn(...)` does this cleanly.
 4. Sanity check: `grep -c "createRoot" index.html` should print exactly `1`.
-5. `git add index.html source/sift-notes-app.jsx` (plus any other changed
-   asset), commit with a plain-language message, `git push origin main`.
-6. Netlify auto-deploys from the push — no further action needed. Tell Arash
-   in plain language what shipped; he doesn't need to know about the build
-   step, just that it's live.
+5. **Draft first, then confirm (Arash's standing preference).**
+   `git add index.html source/sift-notes-app.jsx` (plus any other changed
+   asset), commit with a plain-language message, and push to the session's
+   working branch — **not** `main`. Show him a preview of the change (see
+   "Previewing the app" below), then ask whether to put it live. Only after
+   he says yes, bring the change into `main` and push `main`.
+6. Netlify auto-deploys from the push to `main` — no further action needed.
+   Tell Arash in plain language what shipped; he doesn't need to know about
+   the build step, just that it's live.
+
+### Previewing the app
+
+Arash wants to see a preview of Shift in the chat before a change goes live.
+In cloud sessions `esm.sh` (where `index.html`'s importmap loads React and
+lucide-react) is usually blocked, so the live `index.html` renders blank
+locally. Workaround: in the scratchpad, `npm i react@18.3.1 react-dom@18.3.1
+lucide-react@0.383.0`, bundle `source/entry.jsx` with esbuild **without** the
+`--external` flags (add `--define:process.env.NODE_ENV='"production"'`),
+make a copy of `index.html` with the importmap removed and the module script
+pointing at that bundle, serve it with `python3 -m http.server`, and take
+Playwright screenshots (desktop ~1400×900 and phone ~390×844). This preview
+copy is throwaway: never commit it. A fresh browser has empty local storage,
+so the preview shows an empty app, not his real notes.
 
 Never hand him raw files to upload manually again unless he explicitly asks
 for that — the whole point of this repo is to avoid that.
@@ -144,14 +162,8 @@ for that — the whole point of this repo is to avoid that.
 
 ## Open items / things to follow up on
 
-- Arash was in the middle of connecting this repo to Netlify via "New site
-  from Git" when this session ended. Two things worth checking with him:
-  1. Whether that created a **second, new** Netlify site (new URL) instead
-     of relinking his **existing** site to this repo — if he wants to keep
-     his old URL, the fix is Site settings → Build & deploy → Link
-     repository on the *existing* site, not a fresh "Add new site" flow.
-  2. Whether the first deploy actually shows the current Shift app (not a
-     blank page or an old cached version) — worth a live check.
+- ~~Netlify hookup checks~~ — **done.** Arash confirmed Netlify deploys
+  correctly from GitHub and the live site shows the current Shift app.
 - He explicitly wants to **learn GitHub** as part of this, so keep
   explanations of what a commit/push/deploy did in plain terms rather than
   skipping straight to "done."
