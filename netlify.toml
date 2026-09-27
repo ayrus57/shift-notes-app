@@ -1,0 +1,26 @@
+# Netlify does not serve .webmanifest with the right content type by default,
+# and Chrome silently ignores a manifest served as anything else - which is why
+# the browser offered only "create shortcut" instead of a real install.
+
+[[headers]]
+  for = "/manifest.webmanifest"
+  [headers.values]
+    Content-Type = "application/manifest+json"
+    Cache-Control = "public, max-age=0, must-revalidate"
+
+# the service worker must never be cached, or updates never reach the device
+[[headers]]
+  for = "/sw.js"
+  [headers.values]
+    Content-Type = "text/javascript"
+    Cache-Control = "public, max-age=0, must-revalidate"
+
+[[headers]]
+  for = "/index.html"
+  [headers.values]
+    Cache-Control = "public, max-age=0, must-revalidate"
+
+[[headers]]
+  for = "/*.png"
+  [headers.values]
+    Cache-Control = "public, max-age=86400"
