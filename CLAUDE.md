@@ -173,6 +173,12 @@ for that — the whole point of this repo is to avoid that.
   numbered lists and drag-select) and a plain Markdown textarea (headings
   don't look like headings). **Don't hand-roll editor behavior** — use
   TipTap's extensions/commands.
+- **Focus rings**: buttons, links, dropdowns and `[tabindex]` elements never
+  show an outline when clicked/tapped (Arash asked for the "stroke after
+  click" to be gone everywhere). A `kbd-nav` class on `<html>` (added on Tab,
+  removed on any pointerdown) brings a green ring back for keyboard users
+  only. Text inputs keep their normal focus ring. Don't add per-button
+  outline styles; the global rule covers new buttons automatically.
 - **Undo buttons**: the description field uses `undoHist` /
   `undoField("content")`: an effect watches `editor.content` and pushes the
   previous value, grouping edits less than
@@ -181,6 +187,8 @@ for that — the whole point of this repo is to avoid that.
 
 ## Recent work log (most recent first)
 
+- Removed the focus outline ("stroke") that appeared on buttons after
+  clicking, app-wide.
 - Extra description is now a TipTap rich-text editor that stores Markdown
   (replaced the buggy per-line block editor), and both description fields
   got Undo buttons.

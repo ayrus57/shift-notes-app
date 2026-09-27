@@ -1275,6 +1275,16 @@ export default function ShiftApp() {
   const [newSectionName, setNewSectionName] = useState("");
 
   const fileRef = useRef(null), titleRef = useRef(null), contentRef = useRef(null);
+  // Focus rings on buttons only show while navigating with the keyboard: Tab turns
+  // "kbd-nav" on, any mouse/touch press turns it off again.
+  useEffect(() => {
+    const root = document.documentElement;
+    const onKey = (e) => { if (e.key === "Tab") root.classList.add("kbd-nav"); };
+    const onPointer = () => root.classList.remove("kbd-nav");
+    document.addEventListener("keydown", onKey);
+    document.addEventListener("pointerdown", onPointer);
+    return () => { document.removeEventListener("keydown", onKey); document.removeEventListener("pointerdown", onPointer); };
+  }, []);
 
   useEffect(() => {
     Promise.all([
@@ -2307,7 +2317,12 @@ export default function ShiftApp() {
         ::-webkit-scrollbar-track { background: transparent; }
         button { font-family: inherit; color: inherit; }
         input, textarea, select { font-family: inherit; color: ${C.text}; }
-        input:focus-visible, textarea:focus-visible, button:focus-visible { outline: 2px solid ${C.personal}; outline-offset: 1px; }
+        input:focus-visible, textarea:focus-visible { outline: 2px solid ${C.personal}; outline-offset: 1px; }
+        /* no focus ring on clicked/tapped buttons, links or dropdowns; it only comes back
+           while the keyboard (Tab) is being used to move around - see the kbd-nav effect */
+        button:focus, a:focus, select:focus, [tabindex]:focus { outline: none; }
+        .kbd-nav button:focus-visible, .kbd-nav a:focus-visible, .kbd-nav select:focus-visible,
+        .kbd-nav [tabindex]:focus-visible { outline: 2px solid ${C.personal}; outline-offset: 1px; }
         input, textarea { outline: none; }
         .nav { transition: background 120ms ease; }
         .nav:hover { background: ${C.raised}; }
