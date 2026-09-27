@@ -90,7 +90,15 @@ const DEFAULT_TYPES = [
 ];
 const DEFAULT_ROUTINE_KINDS = ["Organize", "Grow", "Selfcare"];
 // fallback sorting/grouping choices for a Section (or "Everything") that hasn't set its own yet
-const DEFAULT_VIEW_PREFS = { sortBy: "newest", sortChain: [], groupBy: "none", taskScope: "both", listShowArchived: false, listGroupByType: false };
+const DEFAULT_VIEW_PREFS = {
+  sortBy: "newest", sortChain: [], groupBy: "none", taskScope: "both", listShowArchived: false, listGroupByType: false,
+  // Threshold filters, each null (off) or a value on that field's own scale:
+  //  - filterPriority: keep notes at or ABOVE this urgency (this priority or more urgent)
+  //  - filterEffort:   keep notes at or BELOW this effort (this effort or easier)
+  //  - filterQueue:    keep notes at or AFTER this queue stage (this queue or later)
+  //  - filterDate:     keep notes due at or before this date/time (this date or closer to today)
+  filterPriority: null, filterEffort: null, filterQueue: null, filterDate: null,
+};
 
 const DEFAULT_CATEGORIES = {
   Personal: [
@@ -286,6 +294,16 @@ function fmtDate(iso) {
   return hasTime
     ? d.toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })
     : d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+}
+// The single date used to place a note on the "Date" filter/sort scale: the earliest of its
+// deadline, date-trigger, and suggested date (whichever it actually has set).
+function noteRefDate(n) {
+  const dueTrig = (n.triggers || (n.trigger ? [n.trigger] : [])).find((t) => t.kind === "date");
+  const candidates = [n.deadline, dueTrig && dueTrig.at, n.recommendedDate]
+    .map((iso) => toLocalDate(iso))
+    .filter(Boolean);
+  if (!candidates.length) return null;
+  return new Date(Math.min(...candidates.map((d) => d.getTime())));
 }
 
 /* ---------------- map picker ---------------- */
@@ -907,6 +925,10 @@ export default function ShiftApp() {
   const taskScope = viewPrefs.taskScope, setTaskScope = (v) => setViewPref("taskScope", v); // "both" | "tasks" | "subtasks"
   const listShowArchived = viewPrefs.listShowArchived, setListShowArchived = (v) => setViewPref("listShowArchived", v);
   const listGroupByType = viewPrefs.listGroupByType, setListGroupByType = (v) => setViewPref("listGroupByType", v);
+  const filterPriority = viewPrefs.filterPriority, setFilterPriority = (v) => setViewPref("filterPriority", v);
+  const filterEffort = viewPrefs.filterEffort, setFilterEffort = (v) => setViewPref("filterEffort", v);
+  const filterQueue = viewPrefs.filterQueue, setFilterQueue = (v) => setViewPref("filterQueue", v);
+  const filterDate = viewPrefs.filterDate, setFilterDate = (v) => setViewPref("filterDate", v);
   const [loaded, setLoaded] = useState(false);
 
   const [filter, setFilter] = useState({ kind: "all" });
@@ -914,6 +936,14 @@ export default function ShiftApp() {
   const [error, setError] = useState(null);
 
   const [editor, setEditor] = useState(null);
+  // Guards every modal's backdrop click: a drag that starts inside the modal card and is
+  // released on the backdrop (e.g. selecting text and letting go outside the card) must NOT
+  // close the modal. Browsers retarget that "click" to the backdrop itself, so we track
+  // whether the mousedown truly *originated* on the backdrop (not a descendant) and only
+  // close when it did.
+  const overlayDownOnBackdropRef = useRef(false);
+  const overlayMouseDown = (e) => { overlayDownOnBackdropRef.current = e.target === e.currentTarget; };
+  const overlayClickClose = (fn) => () => { if (overlayDownOnBackdropRef.current) fn(); };
   const [busy, setBusy] = useState({});
   const [labelOpen, setLabelOpen] = useState(false);
   const [labelQuery, setLabelQuery] = useState("");
@@ -1364,6 +1394,16 @@ export default function ShiftApp() {
     }
     if (taskScope === "tasks") l = l.filter((n) => !n.parent);
     else if (taskScope === "subtasks") l = l.filter((n) => !!n.parent);
+    if (filterPriority != null) l = l.filter((n) => n.priority != null && n.priority <= filterPriority);
+    if (filterEffort != null) l = l.filter((n) => n.effort != null && n.effort <= filterEffort);
+    if (filterQueue != null) {
+      const idx = QUEUES.indexOf(filterQueue);
+      l = l.filter((n) => n.queue && QUEUES.indexOf(n.queue) >= idx);
+    }
+    if (filterDate) {
+      const cutoff = new Date(filterDate).getTime();
+      l = l.filter((n) => { const d = noteRefDate(n); return d && d.getTime() <= cutoff; });
+    }
     if (search.trim()) {
       const q = search.toLowerCase();
       l = l.filter((n) => (n.title || "").toLowerCase().includes(q) || n.content.toLowerCase().includes(q) || (n.extra || "").toLowerCase().includes(q));
@@ -1375,7 +1415,7 @@ export default function ShiftApp() {
     if (view !== "notes") return [];
     if (!["category", "type", "label"].includes(filter.kind)) return [];
     return applyCommonFilters(archived);
-  }, [archived, filter, view, taskScope, search]);
+  }, [archived, filter, view, taskScope, search, filterPriority, filterEffort, filterQueue, filterDate]);
 
   const visible = React.useMemo(() => {
     let l = applyCommonFilters(view === "archive" ? archived : live);
@@ -1398,7 +1438,7 @@ export default function ShiftApp() {
     const sorted = [...l].sort(sorters[sortBy] || byNewest);
     // pinned notes float above everything, critical notes above the rest
     return sorted.sort((a, b) => (b.pinned ? 2 : 0) - (a.pinned ? 2 : 0) || (b.critical ? 1 : 0) - (a.critical ? 1 : 0));
-  }, [live, archived, view, filter, taskScope, search, sortBy]);
+  }, [live, archived, view, filter, taskScope, search, sortBy, filterPriority, filterEffort, filterQueue, filterDate]);
 
   const [peopleListView, setPeopleListView] = useState(false);
   const [expandedGroups, setExpandedGroups] = useState({});
@@ -1408,7 +1448,7 @@ export default function ShiftApp() {
   const listBase = React.useMemo(() => {
     if (!listShowArchived) return visible;
     return applyCommonFilters([...live, ...archived]);
-  }, [visible, listShowArchived, live, archived, filter, taskScope, search]);
+  }, [visible, listShowArchived, live, archived, filter, taskScope, search, filterPriority, filterEffort, filterQueue, filterDate]);
 
   // Field comparators shared by the List view's clickable, stackable column sort.
   const FIELD_CMP = {
@@ -2094,6 +2134,92 @@ export default function ShiftApp() {
   const extraFocusedLineRef = useRef(0);
   const extraPendingFocusRef = useRef(null); // { index, pos, selEnd? } applied after the next render
   const extraEditTargetRef = useRef(null); // which line to focus when edit mode is first entered
+  // Cross-line selection: since each line is its own <textarea>, native drag-select can only
+  // ever cover text inside one of them. Dragging the mouse across several lines is tracked here
+  // instead, and rendered as a highlighted range that Backspace/Delete/typing/copy all act on.
+  const [extraLineSel, setExtraLineSel] = useState(null); // { start, end } inclusive, start<=end
+  const extraDraggingRef = useRef(false);
+  const extraLineIndexAtY = (clientY) => {
+    const root = extraContainerRef.current;
+    if (!root) return null;
+    const rows = Array.from(root.children || []);
+    let idx = 0;
+    for (let k = 0; k < rows.length; k++) {
+      const r = rows[k].getBoundingClientRect();
+      if (clientY >= r.top + r.height / 2) idx = k; else break;
+    }
+    return idx;
+  };
+  const extraLineMouseDown = (i) => {
+    setExtraLineSel(null);
+    extraDraggingRef.current = true;
+    const onMove = (e) => {
+      const hover = extraLineIndexAtY(e.clientY);
+      if (hover == null) return;
+      if (hover !== i) {
+        // the drag has left the starting line: kill any native in-box text selection and
+        // show the spanned lines as one selection instead
+        if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
+        try { window.getSelection().removeAllRanges(); } catch {}
+        setExtraLineSel({ start: Math.min(i, hover), end: Math.max(i, hover) });
+      } else {
+        setExtraLineSel(null);
+      }
+    };
+    const onUp = () => {
+      extraDraggingRef.current = false;
+      document.removeEventListener("mousemove", onMove);
+      document.removeEventListener("mouseup", onUp);
+    };
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", onUp);
+  };
+  // Backspace/Delete/typing/Escape/copy while a cross-line range is selected. Nothing has
+  // focus during that range (we blur to kill native selection), so these land on document.
+  useEffect(() => {
+    if (!extraLineSel) return;
+    const onKey = (e) => {
+      const lines = (editor.extra || "").split("\n");
+      const { start, end } = extraLineSel;
+      const collapseTo = (index, pos) => { setExtraLineSel(null); extraPendingFocusRef.current = { index, pos }; };
+      if (e.key === "Escape") { setExtraLineSel(null); return; }
+      const isCopy = (e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "c";
+      const isCut = (e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "x";
+      if (isCopy || isCut) {
+        e.preventDefault();
+        const text = lines.slice(start, end + 1).join("\n");
+        if (navigator.clipboard) navigator.clipboard.writeText(text).catch(() => {});
+        if (isCopy) return;
+      }
+      if (isCut || e.key === "Backspace" || e.key === "Delete" || e.key === "Enter") {
+        e.preventDefault();
+        const next = [...lines.slice(0, start), "", ...lines.slice(end + 1)];
+        upd({ extra: next.join("\n") });
+        collapseTo(start, 0);
+        return;
+      }
+      if (e.key.length === 1 && !e.metaKey && !e.ctrlKey && !e.altKey) {
+        e.preventDefault();
+        const next = [...lines.slice(0, start), e.key, ...lines.slice(end + 1)];
+        upd({ extra: next.join("\n") });
+        collapseTo(start, 1);
+      }
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [extraLineSel, editor && editor.extra]);
+  // clicking outside the extra-description editor while a range is selected clears it (and
+  // exits edit mode, matching the normal click-away behavior it's standing in for)
+  useEffect(() => {
+    if (!extraLineSel) return;
+    const onDocDown = (e) => {
+      const root = extraContainerRef.current;
+      if (root && !root.contains(e.target)) { setExtraLineSel(null); setExtraEditing(false); }
+    };
+    document.addEventListener("mousedown", onDocDown);
+    return () => document.removeEventListener("mousedown", onDocDown);
+  }, [extraLineSel]);
+  useEffect(() => { setExtraLineSel(null); }, [editor && editor.id, extraEditing]);
   const extraLineMarker = (line) => {
     const m = (line || "").match(/^(#{1,2})\s+(.*)$/);
     return m ? { level: m[1].length, prefix: m[1] + " ", text: m[2] } : null;
@@ -2637,6 +2763,35 @@ export default function ShiftApp() {
                   {taskContext && <option value="trigger">By trigger</option>}
                   {discoverContext && <option value="kind">By kind</option>}
                 </select>
+                <select style={{ ...st.sel, ...(filterPriority != null ? st.selActive : {}) }}
+                  value={filterPriority == null ? "" : filterPriority}
+                  onChange={(e) => setFilterPriority(e.target.value === "" ? null : Number(e.target.value))}
+                  title="Filter by priority: shows this and more urgent">
+                  <option value="">All priorities</option>
+                  {PRIORITIES.map((p) => <option key={p.v} value={p.v}>{p.name}+ up</option>)}
+                </select>
+                <select style={{ ...st.sel, ...(filterEffort != null ? st.selActive : {}) }}
+                  value={filterEffort == null ? "" : filterEffort}
+                  onChange={(e) => setFilterEffort(e.target.value === "" ? null : Number(e.target.value))}
+                  title="Filter by effort: shows this and easier">
+                  <option value="">All efforts</option>
+                  {[1, 2, 3, 4, 5].map((e) => <option key={e} value={e}>{e} and under</option>)}
+                </select>
+                <select style={{ ...st.sel, ...(filterQueue != null ? st.selActive : {}) }}
+                  value={filterQueue || ""}
+                  onChange={(e) => setFilterQueue(e.target.value || null)}
+                  title="Filter by queue: shows this and later stages">
+                  <option value="">All queues</option>
+                  {QUEUES.map((q) => <option key={q} value={q}>{q}+ down</option>)}
+                </select>
+                <div style={{ display: "flex", alignItems: "center", gap: 3 }}>
+                  <input type="datetime-local" style={{ ...st.sel, ...(filterDate ? st.selActive : {}) }}
+                    value={filterDate || ""} onChange={(e) => setFilterDate(e.target.value || null)}
+                    title="Filter by date: shows notes due at or before this" />
+                  {filterDate && (
+                    <button style={st.ghost} title="Clear date filter" onClick={() => setFilterDate(null)}><X size={12} /></button>
+                  )}
+                </div>
               </>
             )}
             <span style={st.crumb}>
@@ -3524,7 +3679,7 @@ export default function ShiftApp() {
         const q = groupSearchQuery.trim().toLowerCase();
         const filtered = q ? members.filter((c) => c.name.toLowerCase().includes(q)) : members;
         return (
-          <div style={st.overlay} onClick={() => { setGroupSearchModal(null); setGroupSearchQuery(""); }}>
+          <div style={st.overlay} onMouseDown={overlayMouseDown} onClick={overlayClickClose(() => { setGroupSearchModal(null); setGroupSearchQuery(""); })}>
             <div style={st.modal} onClick={(e) => e.stopPropagation()}>
               <div style={st.modalHead}>
                 <h2 style={st.modalTitle}>{groupSearchModal} ({members.length})</h2>
@@ -3556,7 +3711,7 @@ export default function ShiftApp() {
         if (!n) return null;
         const links = extractLinks(n);
         return (
-          <div style={st.overlay} onClick={() => setLinksModal(null)}>
+          <div style={st.overlay} onMouseDown={overlayMouseDown} onClick={overlayClickClose(() => setLinksModal(null))}>
             <div style={st.modal} onClick={(e) => e.stopPropagation()}>
               <div style={st.modalHead}>
                 <h2 style={st.modalTitle}>Links ({links.length})</h2>
@@ -3582,7 +3737,7 @@ export default function ShiftApp() {
         const companies = contacts.filter((x) => x.contactKind === "Company" && x.id !== c.id);
         const otherPeople = contacts.filter((x) => x.id !== c.id);
         return (
-          <div style={st.overlay} onClick={() => setPersonModal(null)}>
+          <div style={st.overlay} onMouseDown={overlayMouseDown} onClick={overlayClickClose(() => setPersonModal(null))}>
             <div style={st.modal} onClick={(e) => e.stopPropagation()}>
               <div style={st.modalHead}>
                 {renaming && renaming.list === "person" && renaming.index === c.id ? (
@@ -3774,7 +3929,7 @@ export default function ShiftApp() {
       })()}
 
       {editor && (
-        <div style={st.overlay} onClick={closeEditor}>
+        <div style={st.overlay} onMouseDown={overlayMouseDown} onClick={overlayClickClose(closeEditor)}>
           <button style={st.overlayCloseBtn} onClick={closeEditor} title="Close"><X size={18} /></button>
           <div style={st.modal} onClick={(e) => e.stopPropagation()}>
                 <div style={st.headBar}>
@@ -3995,21 +4150,25 @@ export default function ShiftApp() {
                             const level = marker ? marker.level : 0;
                             const fontSize = level === 1 ? 19 : level === 2 ? 16 : 12.5;
                             const fontWeight = level ? 700 : 400;
+                            const selected = extraLineSel && i >= extraLineSel.start && i <= extraLineSel.end;
                             return (
-                              <textarea key={i} rows={1}
-                                ref={(el) => { extraLineRefs.current[i] = el; if (el) extraAutoResize(el); }}
-                                value={marker ? marker.text : line}
-                                placeholder={i === 0 && arr.length === 1 && !line ? "Write more detail…" : ""}
-                                autoFocus={extraEditing && i === (extraEditTargetRef.current ?? arr.length - 1)}
-                                style={{
-                                  width: "100%", resize: "none", overflow: "hidden", border: "none", outline: "none",
-                                  background: "transparent", color: C.text, fontFamily: "inherit",
-                                  fontSize, fontWeight, lineHeight: level ? 1.35 : 1.5,
-                                  padding: level === 1 ? "6px 0 2px" : level === 2 ? "4px 0 2px" : "1px 0",
-                                }}
-                                onFocus={() => { extraFocusedLineRef.current = i; }}
-                                onChange={(e) => { onExtraLineChange(i, e.target.value); extraAutoResize(e.target); }}
-                                onKeyDown={(e) => extraLineKeyDown(i, e)} />
+                              <div key={i} onMouseDown={() => extraLineMouseDown(i)}
+                                style={{ borderRadius: 4, background: selected ? C.work + "33" : "transparent" }}>
+                                <textarea rows={1}
+                                  ref={(el) => { extraLineRefs.current[i] = el; if (el) extraAutoResize(el); }}
+                                  value={marker ? marker.text : line}
+                                  placeholder={i === 0 && arr.length === 1 && !line ? "Write more detail…" : ""}
+                                  autoFocus={extraEditing && i === (extraEditTargetRef.current ?? arr.length - 1)}
+                                  style={{
+                                    width: "100%", resize: "none", overflow: "hidden", border: "none", outline: "none",
+                                    background: "transparent", color: C.text, fontFamily: "inherit",
+                                    fontSize, fontWeight, lineHeight: level ? 1.35 : 1.5,
+                                    padding: level === 1 ? "6px 0 2px" : level === 2 ? "4px 0 2px" : "1px 0",
+                                  }}
+                                  onFocus={() => { extraFocusedLineRef.current = i; }}
+                                  onChange={(e) => { onExtraLineChange(i, e.target.value); extraAutoResize(e.target); }}
+                                  onKeyDown={(e) => extraLineKeyDown(i, e)} />
+                              </div>
                             );
                           })}
                         </div>
@@ -4525,7 +4684,7 @@ export default function ShiftApp() {
         const titles = { blocker: "Blocked by which note?", blocking: "What is waiting on this?",
           related: "Relate to which note?", parent: "Which note is the parent?", child: "Add which note as a subtask?" };
         return (
-          <div style={{ ...st.overlay, zIndex: 60 }} onClick={() => setRelPicker(null)}>
+          <div style={{ ...st.overlay, zIndex: 60 }} onMouseDown={overlayMouseDown} onClick={overlayClickClose(() => setRelPicker(null))}>
             <div style={st.modal} onClick={(e) => e.stopPropagation()}>
               <div style={st.modalHead}>
                 <h2 style={st.modalTitle}>{titles[relPicker.kind]}</h2>
@@ -4554,7 +4713,7 @@ export default function ShiftApp() {
       })()}
 
       {mapOpen && (
-        <div style={{ ...st.overlay, zIndex: 60 }} onClick={() => { setMapOpen(false); setMapTarget(null); }}>
+        <div style={{ ...st.overlay, zIndex: 60 }} onMouseDown={overlayMouseDown} onClick={overlayClickClose(() => { setMapOpen(false); setMapTarget(null); })}>
           <div style={{ ...st.modal, width: 470 }} onClick={(e) => e.stopPropagation()}>
             <h2 style={st.modalTitle}>{mapTarget ? "Set place location" : "Pick a place"}</h2>
             <MapPicker onChange={setMapDraft} initial={mapSeed} />
@@ -4572,7 +4731,7 @@ export default function ShiftApp() {
       )}
 
       {cloudOpen && (
-        <div style={st.overlay} onClick={() => setCloudOpen(false)}>
+        <div style={st.overlay} onMouseDown={overlayMouseDown} onClick={overlayClickClose(() => setCloudOpen(false))}>
           <div style={st.modal} onClick={(e) => e.stopPropagation()}>
             <div style={st.modalHead}>
               <h2 style={st.modalTitle}>Sync &amp; backup</h2>
@@ -4653,7 +4812,7 @@ export default function ShiftApp() {
       )}
 
       {settingsOpen && (
-        <div style={st.overlay} onClick={() => setSettingsOpen(false)}>
+        <div style={st.overlay} onMouseDown={overlayMouseDown} onClick={overlayClickClose(() => setSettingsOpen(false))}>
           <div style={st.modal} onClick={(e) => e.stopPropagation()}>
             <div style={st.modalHead}><h2 style={st.modalTitle}>Types &amp; categories</h2>
               <button style={st.ghost} onClick={() => setSettingsOpen(false)}><X size={15} /></button></div>
@@ -5012,6 +5171,7 @@ const st = {
     cursor: "pointer", padding: 0, textDecoration: "underline" },
   correct: { display: "flex", flexWrap: "wrap", gap: 7, alignItems: "center" },
   sel: { background: C.ink, border: `1px solid ${C.line}`, borderRadius: 7, padding: "6px 8px", fontSize: 12 },
+  selActive: { borderColor: C.work, color: C.work },
   sugTitle: { fontSize: 13.5, fontWeight: 600, margin: 0 },
   sugBody: { fontSize: 12.5, lineHeight: 1.55, color: C.dim, margin: 0, whiteSpace: "pre-wrap" },
   teachIn: { background: C.ink, border: `1px solid ${C.line}`, borderRadius: 8, padding: "8px 10px",
