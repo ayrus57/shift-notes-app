@@ -85,9 +85,25 @@ react-dom@18.3.1 lucide-react@0.383.0`, copy `source/` in, and bundle
 page with a `<title>Shift</title>`, the same `<style>` and boot/error script
 as `index.html`, a `#root` div, and the bundle inlined in a
 `<script type="module">`. Leave out `window.__SHIFT_CLOUD` so the preview
-never touches his real Supabase data. The preview starts empty (no real
-notes); anything typed there stays only in that browser. This preview file
-is throwaway: never commit it.
+never touches his real Supabase data. Anything typed there stays only in
+that browser. This preview file is throwaway: never commit it.
+
+The preview is seeded with **sample notes** (fake, preview-only) so every
+feature can be tested: `preview/sample-data.js` (kept in the repo, never
+loaded by the live app), inlined as a plain `<script>` before the app bundle,
+writes `shift::sift-notes`, `shift::sift-contacts`, `shift::sift-places`,
+`shift::sift-labels`, `shift::sift-sections` and `shift::sift-people-groups`
+into localStorage when a `shift-preview-seed` version marker doesn't match,
+plus a small "Reset sample notes" pill (click twice) that clears those keys
+and reloads. Sample notes cover every type, domain/category, priority,
+effort, queue, status, deadlines/suggested dates, all three trigger kinds,
+one-off and repeating reminders, routines (daily/weekly/monthly),
+checklists, parent/child and blocker links, labels, >10 contacts, places,
+two Sections, RTL text, and unfiled/archived/done/trashed notes. Use dates
+relative to "today" so Due soon / Weekly Plan always have content. Field
+formats to match: dates `YYYY-MM-DD` or `YYYY-MM-DDTHH:MM`; `doneAt` is an
+ISO string (and done notes are also `archived: true`); `trashedAt` is a ms
+timestamp; set both `triggers` and legacy `trigger` (= `triggers[0]`).
 
 Never hand him raw files to upload manually again unless he explicitly asks
 for that — the whole point of this repo is to avoid that.
@@ -129,29 +145,26 @@ for that — the whole point of this repo is to avoid that.
   modal — browsers retarget that `click` event's target to the nearest
   common ancestor (the backdrop), so a naive `onClick={closeFn}` on the
   backdrop is NOT safe. Reuse this pattern for any new modal.
-- **Extra-description editor** (the long-form Markdown field) is a
-  **per-line block editor**: each line of `editor.extra` is its own
-  auto-growing `<textarea rows={1}>`, not one big textarea/contentEditable.
-  This is intentional — it's how heading lines (`# `/`## `) get real
-  larger-font WYSIWYG rendering while typing, which an overlay/highlight
-  trick can't do. Consequences to know about:
-  - `extraLineMarker(line)` recognizes heading (`#`/`##`) and numbered-list
-    (`N. `) prefixes and hides them from the editable text (rendered as a
-    fixed, non-editable label instead) so the cursor can never land in
-    front of them. Bullet/checklist/quote prefixes are **not** protected
-    this way yet (not reported as broken; would follow the same pattern if
-    ever asked for).
-  - Native text selection can't span multiple `<textarea>`s, so a
-    **cross-line drag-select** is hand-rolled: `extraLineMouseDown(i)` +
-    document-level `mousemove`/`mouseup` listeners compute which line the
-    mouse is over via bounding rects, blur the focused textarea and
-    highlight the spanned range in `extraLineSel`. A document `keydown`
-    listener then makes Backspace/Delete/typing/copy/cut act on that range.
-    If you touch this editor again, keep this mechanism in mind — it's not
-    a standard controlled-textarea pattern.
+- **Extra-description editor** (the long-form Markdown field) is a **plain,
+  standard Markdown textarea** while editing and the `Markdown` component's
+  rendered view otherwise (click the rendered view to edit; blurring the
+  textarea goes back to rendered). Toolbar buttons only insert standard
+  Markdown syntax at the cursor/selection via `extraEdit(fn)`; Enter on a
+  list line continues the list (`- `, `- [ ] `, `N. `, `> `), Enter on an
+  empty item ends it. Arash explicitly asked for this after the earlier
+  per-line WYSIWYG block editor (one `<textarea>` per line, hidden `#`/`N.`
+  markers, hand-rolled cross-line drag-select) kept producing bugs — **don't
+  bring back a custom per-line / WYSIWYG editor**; keep it a standard field.
+- **Undo buttons** in the description and extra-description fields use
+  `undoHist` / `undoField(field)`: an effect watches `editor.content` and
+  `editor.extra` and pushes the previous value, grouping edits less than
+  `UNDO_GROUP_MS` apart into one step. History resets on every note open
+  (`resetAux` bumps `undoEpoch`).
 
 ## Recent work log (most recent first)
 
+- Extra description is now a standard Markdown textarea (replaced the buggy
+  per-line block editor), and both description fields got Undo buttons.
 - Threshold filters (Priority/Effort/Queue/Date) added next to Sort/Group.
 - Fixed: dragging out of a modal's borders no longer closes it (see overlay
   guard above) — applied to all 8 modals in the app, not just the note editor.

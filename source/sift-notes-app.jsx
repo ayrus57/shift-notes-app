@@ -1561,7 +1561,6 @@ export default function ShiftApp() {
     if (!stack.length) return;
     setUndoHist((h) => ({ ...h, [f]: h[f].slice(0, -1) }));
     if (undoSeenRef.current) { undoSeenRef.current.skip[f] = true; undoSeenRef.current.at[f] = 0; }
-    if (f === "extra") setExtraLineSel(null);
     upd({ [f]: stack[stack.length - 1] });
   };
   const resetAux = () => {
@@ -2159,283 +2158,86 @@ export default function ShiftApp() {
     return null;
   };
   const [extraEditing, setExtraEditing] = useState(false);
-  // Live Notion-style editor: each markdown *line* is its own auto-growing single-block
-  // textarea. Heading lines ("# "/"## ") show their marker hidden and the text itself
-  // rendered big/bold in real time, instead of the literal "#" characters. Enter starts a
-  // new block; Backspace at the very start of a block merges it into the previous one.
-  const extraLineRefs = useRef([]);
-  const extraContainerRef = useRef(null);
-  const extraFocusedLineRef = useRef(0);
-  const extraPendingFocusRef = useRef(null); // { index, pos, selEnd? } applied after the next render
-  const extraEditTargetRef = useRef(null); // which line to focus when edit mode is first entered
-  // Cross-line selection: since each line is its own <textarea>, native drag-select can only
-  // ever cover text inside one of them. Dragging the mouse across several lines is tracked here
-  // instead, and rendered as a highlighted range that Backspace/Delete/typing/copy all act on.
-  const [extraLineSel, setExtraLineSel] = useState(null); // { start, end } inclusive, start<=end
-  const extraDraggingRef = useRef(false);
-  const extraLineIndexAtY = (clientY) => {
-    const root = extraContainerRef.current;
-    if (!root) return null;
-    const rows = Array.from(root.children || []);
-    let idx = 0;
-    for (let k = 0; k < rows.length; k++) {
-      const r = rows[k].getBoundingClientRect();
-      if (clientY >= r.top + r.height / 2) idx = k; else break;
-    }
-    return idx;
-  };
-  const extraLineMouseDown = (i) => {
-    setExtraLineSel(null);
-    extraDraggingRef.current = true;
-    const onMove = (e) => {
-      const hover = extraLineIndexAtY(e.clientY);
-      if (hover == null) return;
-      if (hover !== i) {
-        // the drag has left the starting line: kill any native in-box text selection and
-        // show the spanned lines as one selection instead
-        if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
-        try { window.getSelection().removeAllRanges(); } catch {}
-        setExtraLineSel({ start: Math.min(i, hover), end: Math.max(i, hover) });
-      } else {
-        setExtraLineSel(null);
-      }
-    };
-    const onUp = () => {
-      extraDraggingRef.current = false;
-      document.removeEventListener("mousemove", onMove);
-      document.removeEventListener("mouseup", onUp);
-    };
-    document.addEventListener("mousemove", onMove);
-    document.addEventListener("mouseup", onUp);
-  };
-  // Backspace/Delete/typing/Escape/copy while a cross-line range is selected. Nothing has
-  // focus during that range (we blur to kill native selection), so these land on document.
+  // Extra description: a plain Markdown textarea while editing, rendered Markdown otherwise.
+  // The toolbar buttons just insert standard Markdown syntax at the cursor / selection.
+  const extraRef = useRef(null);
+  const extraSelAfterRef = useRef(null); // [start, end] to restore after the next render
   useEffect(() => {
-    if (!extraLineSel) return;
-    const onKey = (e) => {
-      const lines = (editor.extra || "").split("\n");
-      const { start, end } = extraLineSel;
-      const collapseTo = (index, pos) => { setExtraLineSel(null); extraPendingFocusRef.current = { index, pos }; };
-      if (e.key === "Escape") { setExtraLineSel(null); return; }
-      const isCopy = (e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "c";
-      const isCut = (e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "x";
-      if (isCopy || isCut) {
-        e.preventDefault();
-        const text = lines.slice(start, end + 1).join("\n");
-        if (navigator.clipboard) navigator.clipboard.writeText(text).catch(() => {});
-        if (isCopy) return;
-      }
-      if (isCut || e.key === "Backspace" || e.key === "Delete" || e.key === "Enter") {
-        e.preventDefault();
-        const next = [...lines.slice(0, start), "", ...lines.slice(end + 1)];
-        upd({ extra: next.join("\n") });
-        collapseTo(start, 0);
-        return;
-      }
-      if (e.key.length === 1 && !e.metaKey && !e.ctrlKey && !e.altKey) {
-        e.preventDefault();
-        const next = [...lines.slice(0, start), e.key, ...lines.slice(end + 1)];
-        upd({ extra: next.join("\n") });
-        collapseTo(start, 1);
-      }
-    };
-    document.addEventListener("keydown", onKey);
-    return () => document.removeEventListener("keydown", onKey);
-  }, [extraLineSel, editor && editor.extra]);
-  // clicking outside the extra-description editor while a range is selected clears it (and
-  // exits edit mode, matching the normal click-away behavior it's standing in for)
-  useEffect(() => {
-    if (!extraLineSel) return;
-    const onDocDown = (e) => {
-      const root = extraContainerRef.current;
-      if (root && !root.contains(e.target)) { setExtraLineSel(null); setExtraEditing(false); }
-    };
-    document.addEventListener("mousedown", onDocDown);
-    return () => document.removeEventListener("mousedown", onDocDown);
-  }, [extraLineSel]);
-  useEffect(() => { setExtraLineSel(null); }, [editor && editor.id, extraEditing]);
-  const extraLineMarker = (line) => {
-    const raw = line || "";
-    const h = raw.match(/^(#{1,2})\s+(.*)$/);
-    if (h) return { level: h[1].length, prefix: h[1] + " ", text: h[2] };
-    // Numbered-list rows: the "N. " is a fixed, non-editable label (like the heading's "#"),
-    // so the cursor can never land in front of the number and start typing there.
-    const n = raw.match(/^(\d+)\.\s(.*)$/);
-    if (n) return { level: 0, num: n[1], prefix: n[1] + ". ", text: n[2] };
-    return null;
-  };
-  const extraAutoResize = (el) => {
-    if (!el) return;
-    el.style.height = "auto";
-    el.style.height = el.scrollHeight + "px";
-  };
-  useEffect(() => {
-    const pf = extraPendingFocusRef.current;
-    if (!pf) return;
-    extraPendingFocusRef.current = null;
-    const el = extraLineRefs.current[pf.index];
-    if (el) {
-      el.focus();
-      const p = Math.max(0, Math.min(pf.pos ?? 0, el.value.length));
-      const endP = pf.selEnd != null ? Math.min(pf.selEnd, el.value.length) : p;
-      try { el.setSelectionRange(p, endP); } catch {}
-    }
+    const sel = extraSelAfterRef.current, el = extraRef.current;
+    if (!sel || !el) return;
+    extraSelAfterRef.current = null;
+    el.focus();
+    try { el.setSelectionRange(sel[0], sel[1]); } catch {}
   }, [editor && editor.extra]);
   useEffect(() => {
-    if (!extraEditing) return;
-    const i = extraEditTargetRef.current;
-    extraEditTargetRef.current = null;
-    if (i == null) return;
-    const el = extraLineRefs.current[i];
-    if (el) { el.focus(); const p = el.value.length; try { el.setSelectionRange(p, p); } catch {} }
+    const el = extraRef.current;
+    if (!extraEditing || !el) return;
+    el.focus();
+    const p = el.value.length;
+    try { el.setSelectionRange(p, p); } catch {}
   }, [extraEditing]);
-  const onExtraLineChange = (i, displayVal) => {
-    const lines = (editor.extra || "").split("\n");
-    const marker = extraLineMarker(lines[i] || "");
-    lines[i] = marker ? marker.prefix + displayVal : displayVal;
-    upd({ extra: lines.join("\n") });
+  // runs fn(text, selStart, selEnd) -> { text, sel } against the textarea's current selection
+  const extraEdit = (fn) => {
+    const el = extraRef.current;
+    const text = editor.extra || "";
+    const s = el ? el.selectionStart : text.length, e = el ? el.selectionEnd : text.length;
+    const r = fn(text, s, e);
+    extraSelAfterRef.current = r.sel;
+    upd({ extra: r.text });
   };
-  // shared by all the formatting toolbar buttons - they act on whichever line was last focused
-  const extraApplyLineMarker = (prefix) => {
-    const i = extraFocusedLineRef.current;
-    const lines = (editor.extra || "").split("\n");
-    const raw = lines[i] || "";
-    const stripped = raw.replace(/^(#{1,2}\s+|-\s\[[ xX]\]\s+|-\s+|>\s+|\d+\.\s+)/, "");
-    const already = raw.length !== stripped.length && raw.slice(0, raw.length - stripped.length) === prefix;
-    lines[i] = already ? stripped : prefix + stripped;
-    upd({ extra: lines.join("\n") });
-    extraPendingFocusRef.current = { index: i, pos: 0 };
-  };
-  const extraLinePrefix = (prefix) => extraApplyLineMarker(prefix);
-  const extraNumberedList = () => {
-    const i = extraFocusedLineRef.current;
-    const lines = (editor.extra || "").split("\n");
-    const prev = i > 0 ? lines[i - 1] : "";
-    const m = (prev || "").match(/^(\d+)\.\s/);
-    extraApplyLineMarker(`${m ? parseInt(m[1], 10) + 1 : 1}. `);
-  };
-  const extraWrapSelection = (before, after = before) => {
-    const i = extraFocusedLineRef.current;
-    const input = extraLineRefs.current[i]; if (!input) return;
-    const lines = (editor.extra || "").split("\n");
-    const raw = lines[i] || "";
-    const marker = extraLineMarker(raw);
-    const prefixLen = marker ? marker.prefix.length : 0;
-    const s = input.selectionStart, e = input.selectionEnd;
-    const rawS = s + prefixLen, rawE = e + prefixLen;
-    lines[i] = raw.slice(0, rawS) + before + raw.slice(rawS, rawE) + after + raw.slice(rawE);
-    upd({ extra: lines.join("\n") });
-    extraPendingFocusRef.current = { index: i, pos: s + before.length, selEnd: e + before.length };
-  };
-  const extraInsertLink = () => {
-    const i = extraFocusedLineRef.current;
-    const input = extraLineRefs.current[i]; if (!input) return;
-    const lines = (editor.extra || "").split("\n");
-    const raw = lines[i] || "";
-    const marker = extraLineMarker(raw);
-    const prefixLen = marker ? marker.prefix.length : 0;
-    const s = input.selectionStart, e = input.selectionEnd;
-    const rawS = s + prefixLen, rawE = e + prefixLen;
-    const label = raw.slice(rawS, rawE) || "text";
-    lines[i] = raw.slice(0, rawS) + `[${label}](url)` + raw.slice(rawE);
-    upd({ extra: lines.join("\n") });
-    const from = s + label.length + 3;
-    extraPendingFocusRef.current = { index: i, pos: from, selEnd: from + 3 };
-  };
-  const extraInsertDivider = () => {
-    const i = extraFocusedLineRef.current;
-    const lines = (editor.extra || "").split("\n");
-    const next = [...lines.slice(0, i + 1), "---", "", ...lines.slice(i + 1)];
-    upd({ extra: next.join("\n") });
-    extraPendingFocusRef.current = { index: i + 2, pos: 0 };
-  };
-  // Notion/Keep-style smart lists + block split/merge, all scoped to one line's textarea.
-  const extraLineKeyDown = (i, e) => {
-    const input = e.currentTarget;
-    const lines = (editor.extra || "").split("\n");
-    const raw = lines[i] || "";
-    const marker = extraLineMarker(raw);
-    const prefixLen = marker ? marker.prefix.length : 0;
-
-    if (e.key === "Enter") {
-      e.preventDefault();
-      if (input.selectionStart !== input.selectionEnd) return;
-      const rawPos = input.selectionStart + prefixLen;
-      const beforeRaw = raw.slice(0, rawPos), afterRaw = raw.slice(rawPos);
-      const numMatch = beforeRaw.match(/^(\d+)\.\s/);
-      const checkMatch = beforeRaw.match(/^-\s\[[ xX]\]\s/);
-      const bulletMatch = !checkMatch && beforeRaw.match(/^-\s/);
-      const listMarker = numMatch ? `${parseInt(numMatch[1], 10) + 1}. ` : checkMatch ? "- [ ] " : bulletMatch ? "- " : null;
-      if (listMarker) {
-        const bare = (numMatch || checkMatch || bulletMatch)[0];
-        if (beforeRaw === bare && afterRaw === "") {
-          const next = [...lines]; next[i] = "";
-          upd({ extra: next.join("\n") });
-          extraPendingFocusRef.current = { index: i, pos: 0 };
-          return;
-        }
-        const next = [...lines];
-        next[i] = beforeRaw;
-        next.splice(i + 1, 0, listMarker + afterRaw);
-        if (numMatch) {
-          let expected = parseInt(numMatch[1], 10) + 2;
-          for (let k = i + 2; k < next.length; k++) {
-            const m = next[k].match(/^(\d+)\.\s/);
-            if (!m) break;
-            next[k] = next[k].replace(/^\d+\./, String(expected) + ".");
-            expected++;
-          }
-        }
-        upd({ extra: next.join("\n") });
-        extraPendingFocusRef.current = { index: i + 1, pos: 0 };
-        return;
-      }
-      const next = [...lines];
-      next[i] = beforeRaw;
-      next.splice(i + 1, 0, afterRaw);
-      upd({ extra: next.join("\n") });
-      extraPendingFocusRef.current = { index: i + 1, pos: 0 };
+  const EXTRA_LINE_MARKER = /^(#{1,6}\s+|-\s\[[ xX]\]\s+|[-*]\s+|>\s+|\d+\.\s+)/;
+  // Puts a line marker ("# ", "- ", "> "...) on every line the selection touches, or takes it
+  // off again if all of them already have it. numbered = "1. ", "2. "... instead of one prefix.
+  const extraLinePrefix = (prefix, numbered = false) => extraEdit((text, s, e) => {
+    const ls = text.lastIndexOf("\n", s - 1) + 1;
+    let le = text.indexOf("\n", e);
+    if (le < 0) le = text.length;
+    const lines = text.slice(ls, le).split("\n");
+    const has = (l) => (numbered ? /^\d+\.\s/.test(l)
+      : prefix === "- " ? l.startsWith("- ") && !/^-\s\[[ xX]\]/.test(l) : l.startsWith(prefix));
+    const allHave = lines.every(has);
+    const out = lines.map((l, k) => {
+      const bare = l.replace(EXTRA_LINE_MARKER, "");
+      return allHave ? bare : (numbered ? `${k + 1}. ` : prefix) + bare;
+    }).join("\n");
+    const end = ls + out.length;
+    return { text: text.slice(0, ls) + out + text.slice(le), sel: [end, end] };
+  });
+  const extraNumberedList = () => extraLinePrefix("", true);
+  const extraWrapSelection = (before, after = before) => extraEdit((text, s, e) => ({
+    text: text.slice(0, s) + before + text.slice(s, e) + after + text.slice(e),
+    sel: [s + before.length, e + before.length],
+  }));
+  const extraInsertLink = () => extraEdit((text, s, e) => {
+    const label = text.slice(s, e) || "text";
+    const from = s + label.length + 3; // selects the "url" placeholder
+    return { text: text.slice(0, s) + `[${label}](url)` + text.slice(e), sel: [from, from + 3] };
+  });
+  const extraInsertDivider = () => extraEdit((text, s, e) => {
+    const before = s === 0 ? "" : text[s - 1] === "\n" ? "\n" : "\n\n";
+    const ins = before + "---\n\n";
+    return { text: text.slice(0, s) + ins + text.slice(e), sel: [s + ins.length, s + ins.length] };
+  });
+  // Enter on a list line starts the next item ("- ", "- [ ] ", "2. ", "> "); Enter on an
+  // item that's still empty ends the list instead. Everything else is the normal textarea.
+  const extraKeyDown = (ev) => {
+    if (ev.key !== "Enter" || ev.shiftKey || ev.nativeEvent.isComposing) return;
+    const el = ev.currentTarget, text = el.value, s = el.selectionStart;
+    if (s !== el.selectionEnd) return;
+    const ls = text.lastIndexOf("\n", s - 1) + 1;
+    const line = text.slice(ls, s);
+    const m = line.match(/^(\s*)(?:(\d+)\.\s|(-\s\[[ xX]\]\s|[-*]\s|>\s))/);
+    if (!m) return;
+    ev.preventDefault();
+    if (line === m[0]) { // empty item: drop the marker and stop the list
+      extraSelAfterRef.current = [ls, ls];
+      upd({ extra: text.slice(0, ls) + text.slice(s) });
       return;
     }
-
-    if (e.key === "Backspace") {
-      if (input.selectionStart !== input.selectionEnd || input.selectionStart !== 0) return;
-      e.preventDefault();
-      if (marker && marker.text === "") {
-        // an empty heading just converted - revert it to plain "#" text so it can keep being edited/deleted
-        const next = [...lines]; next[i] = "#".repeat(marker.level);
-        upd({ extra: next.join("\n") });
-        extraPendingFocusRef.current = { index: i, pos: marker.level };
-        return;
-      }
-      if (i === 0) return;
-      const next = [...lines];
-      const prevRaw = next[i - 1] || "";
-      const prevMarker = extraLineMarker(prevRaw);
-      next[i - 1] = prevRaw + raw;
-      next.splice(i, 1);
-      upd({ extra: next.join("\n") });
-      extraPendingFocusRef.current = { index: i - 1, pos: prevMarker ? prevRaw.length - prevMarker.prefix.length : prevRaw.length };
-      return;
-    }
-
-    if (e.key === "ArrowUp" && i > 0) { e.preventDefault(); extraPendingFocusRef.current = { index: i - 1, pos: input.selectionStart }; return; }
-    if (e.key === "ArrowDown" && i < lines.length - 1) { e.preventDefault(); extraPendingFocusRef.current = { index: i + 1, pos: input.selectionStart }; return; }
-  };
-  // clicking into the rendered read-view: guess which block was clicked by vertical
-  // position among its rendered children, then map proportionally onto the source lines
-  const extraClickToEdit = (e) => {
-    const container = e.currentTarget;
-    const children = Array.from(container.children || []);
-    let blockIdx = 0;
-    for (let k = 0; k < children.length; k++) {
-      const r = children[k].getBoundingClientRect();
-      if (e.clientY >= r.top) blockIdx = k; else break;
-    }
-    const totalLines = (editor.extra || "").split("\n").length;
-    const totalBlocks = Math.max(1, children.length);
-    extraEditTargetRef.current = Math.max(0, Math.min(totalLines - 1, Math.round((blockIdx / totalBlocks) * totalLines)));
-    setExtraEditing(true);
+    const next = m[1] + (m[2] ? `${parseInt(m[2], 10) + 1}. ` : /^-\s\[/.test(m[3]) ? "- [ ] " : m[3]);
+    const ins = "\n" + next;
+    extraSelAfterRef.current = [s + ins.length, s + ins.length];
+    upd({ extra: text.slice(0, s) + ins + text.slice(s) });
   };
   const [newChecklistItem, setNewChecklistItem] = useState("");
   const addChecklistItem = () => {
@@ -4187,53 +3989,18 @@ export default function ShiftApp() {
                             <Undo2 size={12} /> Undo
                           </button>
                         </div>
-                        <div
-                          style={{ ...st.teachIn, ...rtl(editor.extra), marginTop: 6, width: "100%", minHeight: 220,
-                            display: "flex", flexDirection: "column", gap: 2 }}
-                          onBlur={() => {
-                            setTimeout(() => {
-                              const root = extraContainerRef.current;
-                              if (root && !root.contains(document.activeElement)) setExtraEditing(false);
-                            }, 0);
-                          }}
-                          ref={extraContainerRef}>
-                          {(editor.extra || "").split("\n").map((line, i, arr) => {
-                            const marker = extraLineMarker(line);
-                            const level = marker ? marker.level : 0;
-                            const fontSize = level === 1 ? 19 : level === 2 ? 16 : 12.5;
-                            const fontWeight = level ? 700 : 400;
-                            const selected = extraLineSel && i >= extraLineSel.start && i <= extraLineSel.end;
-                            return (
-                              <div key={i} onMouseDown={() => extraLineMouseDown(i)}
-                                style={{ borderRadius: 4, background: selected ? C.work + "33" : "transparent",
-                                  display: "flex", alignItems: "flex-start", gap: 6 }}>
-                                {marker && marker.num != null && (
-                                  <span style={{ flexShrink: 0, padding: "1px 0", fontSize: 12.5, color: C.dim, userSelect: "none" }}>
-                                    {marker.num}.
-                                  </span>
-                                )}
-                                <textarea rows={1}
-                                  ref={(el) => { extraLineRefs.current[i] = el; if (el) extraAutoResize(el); }}
-                                  value={marker ? marker.text : line}
-                                  placeholder={i === 0 && arr.length === 1 && !line ? "Write more detail…" : ""}
-                                  autoFocus={extraEditing && i === (extraEditTargetRef.current ?? arr.length - 1)}
-                                  style={{
-                                    width: "100%", resize: "none", overflow: "hidden", border: "none", outline: "none",
-                                    background: "transparent", color: C.text, fontFamily: "inherit",
-                                    fontSize, fontWeight, lineHeight: level ? 1.35 : 1.5,
-                                    padding: level === 1 ? "6px 0 2px" : level === 2 ? "4px 0 2px" : "1px 0",
-                                  }}
-                                  onFocus={() => { extraFocusedLineRef.current = i; }}
-                                  onChange={(e) => { onExtraLineChange(i, e.target.value); extraAutoResize(e.target); }}
-                                  onKeyDown={(e) => extraLineKeyDown(i, e)} />
-                              </div>
-                            );
-                          })}
-                        </div>
+                        <textarea ref={extraRef} value={editor.extra || ""}
+                          placeholder="Write more detail… (Markdown: # heading, - list, 1. numbered, **bold**)"
+                          rows={Math.max(10, (editor.extra || "").split("\n").length + 1)}
+                          style={{ ...st.teachIn, ...rtl(editor.extra), marginTop: 6, width: "100%", boxSizing: "border-box",
+                            minHeight: 220, resize: "vertical", color: C.text, fontFamily: "inherit", fontSize: 13, lineHeight: 1.6, outline: "none" }}
+                          onChange={(e) => upd({ extra: e.target.value })}
+                          onKeyDown={extraKeyDown}
+                          onBlur={() => setExtraEditing(false)} />
                       </>
                     ) : (
                       <div style={{ ...st.mdBox, ...rtl(editor.extra), marginTop: 6, cursor: "text", minHeight: 220 }}
-                        onClick={extraClickToEdit}>
+                        onClick={(e) => { if (!e.target.closest("a")) setExtraEditing(true); }}>
                         <Markdown text={editor.extra} />
                       </div>
                     )
