@@ -7,8 +7,13 @@ import {
   Clock, Minus, Crosshair, Compass, Archive, ArchiveRestore, Flame, ChevronDown, ChevronUp,
   ChevronRight, User, UserPlus, Gauge, Repeat, CalendarClock, ArrowUpDown, Layers, Flag, Cloud,
   Siren, ArrowUp, ArrowDown, Rows, Columns, Paperclip, Upload,
-  Heading1, Heading2, Bold, Italic, List, Quote, Code, Link as LinkIcon, Eye, EyeOff, Info, Copy,
+  Heading1, Heading2, Bold, Italic, List, Quote, Code, Link as LinkIcon, Eye, EyeOff, Info, Copy, Undo2,
 } from "lucide-react";
+import { Editor as TiptapEditor, Extension } from "@tiptap/core";
+import StarterKit from "@tiptap/starter-kit";
+import { Markdown as TiptapMarkdown } from "@tiptap/markdown";
+import { TaskList, TaskItem } from "@tiptap/extension-list";
+import { Placeholder } from "@tiptap/extensions";
 
 /* ---------------- tokens ---------------- */
 
@@ -642,6 +647,8 @@ function mdInline(text, key) {
   const out = [];
   let rest = text, i = 0;
   const patterns = [
+    // a backslash-escaped character (the rich editor writes e.g. "\[" for a literal "[") shows as itself
+    { re: /\\([\\`*_{}\[\]()#+\-.!>|~])/, render: (m) => m[1] },
     { re: /`([^`]+)`/, render: (m, k) => <code key={k} style={st.mdCode}>{m[1]}</code> },
     { re: /\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/, render: (m, k) => <a key={k} href={m[2]} target="_blank" rel="noreferrer" style={st.mdLink}>{m[1]}</a> },
     { re: /\*\*([^*]+)\*\*/, render: (m, k) => <strong key={k}>{m[1]}</strong> },
@@ -662,6 +669,94 @@ function mdInline(text, key) {
     rest = rest.slice(best.m.index + best.m[0].length);
   }
   return out;
+}
+
+/* ---------------- extra-description rich text editor ---------------- */
+
+// Each text block picks its own direction from its first letter, so Persian lines run RTL.
+const AutoDir = Extension.create({
+  name: "autoDir",
+  addGlobalAttributes() {
+    return [{
+      types: ["paragraph", "heading", "blockquote", "listItem", "taskItem"],
+      attributes: { dir: { default: "auto", rendered: true, renderHTML: () => ({ dir: "auto" }), parseHTML: () => "auto" } },
+    }];
+  },
+});
+
+const MD_EDITOR_CSS = `
+.shift-md-editor .ProseMirror { outline: none; min-height: 200px; font-size: 13px; line-height: 1.6; color: ${C.text}; word-break: break-word; }
+.shift-md-editor .ProseMirror > * + * { margin-top: 4px; }
+.shift-md-editor p { margin: 0; }
+.shift-md-editor h1, .shift-md-editor h2, .shift-md-editor h3 { font-weight: 700; line-height: 1.3; margin: 10px 0 4px; }
+.shift-md-editor h1 { font-size: 20px; }
+.shift-md-editor h2 { font-size: 16.5px; }
+.shift-md-editor h3 { font-size: 14px; }
+.shift-md-editor .ProseMirror > :first-child { margin-top: 0; }
+.shift-md-editor ul, .shift-md-editor ol { margin: 2px 0; padding-inline-start: 22px; }
+.shift-md-editor li { margin: 2px 0; }
+.shift-md-editor li > p { margin: 0; }
+.shift-md-editor ol > li::marker { color: ${C.dim}; }
+.shift-md-editor ul[data-type="taskList"] { list-style: none; padding-inline-start: 2px; }
+.shift-md-editor ul[data-type="taskList"] li { display: flex; align-items: flex-start; gap: 7px; }
+.shift-md-editor ul[data-type="taskList"] li > label { flex-shrink: 0; margin-top: 3px; user-select: none; }
+.shift-md-editor ul[data-type="taskList"] li > label input { accent-color: ${C.personal}; margin: 0; cursor: pointer; }
+.shift-md-editor ul[data-type="taskList"] li > div { flex: 1; min-width: 0; }
+.shift-md-editor ul[data-type="taskList"] li[data-checked="true"] > div { text-decoration: line-through; opacity: .6; }
+.shift-md-editor blockquote { margin: 4px 0; padding-inline-start: 10px; border-inline-start: 2px solid ${C.line}; color: ${C.dim}; }
+.shift-md-editor hr { border: none; border-top: 1px solid ${C.line}; margin: 10px 0; }
+.shift-md-editor hr.ProseMirror-selectednode { border-top-color: ${C.work}; }
+.shift-md-editor code { background: ${C.raised}; border-radius: 4px; padding: 1px 5px; font-size: 12px; font-family: ui-monospace, monospace; }
+.shift-md-editor pre { background: ${C.raised}; border-radius: 6px; padding: 8px 10px; overflow-x: auto; }
+.shift-md-editor pre code { background: none; padding: 0; }
+.shift-md-editor a { color: ${C.work}; text-decoration: underline; }
+.shift-md-editor p.is-editor-empty:first-child::before { content: attr(data-placeholder); color: ${C.dimmer}; float: left; height: 0; pointer-events: none; }
+`;
+
+// Rich text editor (TipTap) for the extra description. Headings, lists, checklists etc. show
+// formatted while typing, but the value going in and out is plain Markdown, so everything
+// else (the note card preview, sync, the Claude connector) keeps working with Markdown.
+// onEditor(editor) fires on every change so the toolbar can show active/undo states.
+function MarkdownEditor({ value, onChange, onEditor, placeholder }) {
+  const hostRef = useRef(null);
+  const edRef = useRef(null);
+  const lastMd = useRef(value || "");
+  const cb = useRef({});
+  cb.current = { onChange, onEditor };
+  useEffect(() => {
+    const ed = new TiptapEditor({
+      element: hostRef.current,
+      extensions: [
+        StarterKit.configure({ heading: { levels: [1, 2, 3] }, link: { openOnClick: false, autolink: true } }),
+        TaskList, TaskItem.configure({ nested: true }),
+        TiptapMarkdown, Placeholder.configure({ placeholder: placeholder || "" }), AutoDir,
+      ],
+      content: value || "",
+      contentType: "markdown",
+      onUpdate: ({ editor }) => {
+        const md = editor.getMarkdown();
+        lastMd.current = md;
+        cb.current.onChange && cb.current.onChange(md);
+      },
+      onTransaction: ({ editor }) => { cb.current.onEditor && cb.current.onEditor(editor); },
+    });
+    edRef.current = ed;
+    cb.current.onEditor && cb.current.onEditor(ed);
+    return () => { cb.current.onEditor && cb.current.onEditor(null); ed.destroy(); edRef.current = null; };
+  }, []);
+  // the value was changed from outside (e.g. a sync arrived) - load it without an "update"
+  useEffect(() => {
+    const ed = edRef.current;
+    if (!ed || (value || "") === lastMd.current) return;
+    lastMd.current = value || "";
+    ed.commands.setContent(value || "", { contentType: "markdown", emitUpdate: false });
+  }, [value]);
+  return (
+    <>
+      <style>{MD_EDITOR_CSS}</style>
+      <div ref={hostRef} className="shift-md-editor" />
+    </>
+  );
 }
 
 function Markdown({ text }) {
@@ -1180,6 +1275,16 @@ export default function ShiftApp() {
   const [newSectionName, setNewSectionName] = useState("");
 
   const fileRef = useRef(null), titleRef = useRef(null), contentRef = useRef(null);
+  // Focus rings on buttons only show while navigating with the keyboard: Tab turns
+  // "kbd-nav" on, any mouse/touch press turns it off again.
+  useEffect(() => {
+    const root = document.documentElement;
+    const onKey = (e) => { if (e.key === "Tab") root.classList.add("kbd-nav"); };
+    const onPointer = () => root.classList.remove("kbd-nav");
+    document.addEventListener("keydown", onKey);
+    document.addEventListener("pointerdown", onPointer);
+    return () => { document.removeEventListener("keydown", onKey); document.removeEventListener("pointerdown", onPointer); };
+  }, []);
 
   useEffect(() => {
     Promise.all([
@@ -1531,11 +1636,43 @@ export default function ShiftApp() {
   const upd = (f) => setEditor((p) => (p ? { ...p, ...f } : p));
   const [activeMore, setActiveMore] = useState(null); // which popover (reminder/label/people/places/dates/images/attachments) is open, if any
   const [moreExpanded, setMoreExpanded] = useState(false);
+  // Undo for the description field (the extra description's rich editor has its own undo
+  // history). The stack holds earlier values; edits that land within UNDO_GROUP_MS of the
+  // previous one join the same step, so one Undo takes back a word or phrase rather than a
+  // single letter.
+  const UNDO_GROUP_MS = 800;
+  const [undoHist, setUndoHist] = useState({ content: [] });
+  const undoSeenRef = useRef(null); // last values seen; null = take a fresh baseline
+  const [undoEpoch, setUndoEpoch] = useState(0); // bumped when a note is opened, to re-baseline
+  useEffect(() => {
+    if (!editor) return;
+    const cur = { content: editor.content || "" };
+    const seen = undoSeenRef.current;
+    if (!seen) { undoSeenRef.current = { ...cur, at: {}, skip: {} }; return; }
+    ["content"].forEach((f) => {
+      if (cur[f] === seen[f]) return;
+      const before = seen[f];
+      seen[f] = cur[f];
+      if (seen.skip[f]) { seen.skip[f] = false; return; } // this change was the undo itself
+      const now = Date.now();
+      const joins = now - (seen.at[f] || 0) < UNDO_GROUP_MS;
+      seen.at[f] = now;
+      setUndoHist((h) => (joins && h[f].length ? h : { ...h, [f]: [...h[f].slice(-99), before] }));
+    });
+  }, [editor && editor.content, undoEpoch]);
+  const undoField = (f) => {
+    const stack = undoHist[f];
+    if (!stack.length) return;
+    setUndoHist((h) => ({ ...h, [f]: h[f].slice(0, -1) }));
+    if (undoSeenRef.current) { undoSeenRef.current.skip[f] = true; undoSeenRef.current.at[f] = 0; }
+    upd({ [f]: stack[stack.length - 1] });
+  };
   const resetAux = () => {
     setLabelOpen(false); setLabelQuery(""); setBusy({}); setMapOpen(false);
     setExtraOpen(false); setContactQuery(""); setTab("filing"); setRelationsOpen(false);
     setActiveMore(null);
     setMoreExpanded(false);
+    setUndoHist({ content: [] }); undoSeenRef.current = null; setUndoEpoch((x) => x + 1);
   };
   const openNew = () => {
     setEditor({ id: null, title: "", content: "", extra: "", labels: [], contacts: [], assignees: [],
@@ -2124,284 +2261,24 @@ export default function ShiftApp() {
     );
     return null;
   };
-  const [extraEditing, setExtraEditing] = useState(false);
-  // Live Notion-style editor: each markdown *line* is its own auto-growing single-block
-  // textarea. Heading lines ("# "/"## ") show their marker hidden and the text itself
-  // rendered big/bold in real time, instead of the literal "#" characters. Enter starts a
-  // new block; Backspace at the very start of a block merges it into the previous one.
-  const extraLineRefs = useRef([]);
-  const extraContainerRef = useRef(null);
-  const extraFocusedLineRef = useRef(0);
-  const extraPendingFocusRef = useRef(null); // { index, pos, selEnd? } applied after the next render
-  const extraEditTargetRef = useRef(null); // which line to focus when edit mode is first entered
-  // Cross-line selection: since each line is its own <textarea>, native drag-select can only
-  // ever cover text inside one of them. Dragging the mouse across several lines is tracked here
-  // instead, and rendered as a highlighted range that Backspace/Delete/typing/copy all act on.
-  const [extraLineSel, setExtraLineSel] = useState(null); // { start, end } inclusive, start<=end
-  const extraDraggingRef = useRef(false);
-  const extraLineIndexAtY = (clientY) => {
-    const root = extraContainerRef.current;
-    if (!root) return null;
-    const rows = Array.from(root.children || []);
-    let idx = 0;
-    for (let k = 0; k < rows.length; k++) {
-      const r = rows[k].getBoundingClientRect();
-      if (clientY >= r.top + r.height / 2) idx = k; else break;
-    }
-    return idx;
-  };
-  const extraLineMouseDown = (i) => {
-    setExtraLineSel(null);
-    extraDraggingRef.current = true;
-    const onMove = (e) => {
-      const hover = extraLineIndexAtY(e.clientY);
-      if (hover == null) return;
-      if (hover !== i) {
-        // the drag has left the starting line: kill any native in-box text selection and
-        // show the spanned lines as one selection instead
-        if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
-        try { window.getSelection().removeAllRanges(); } catch {}
-        setExtraLineSel({ start: Math.min(i, hover), end: Math.max(i, hover) });
-      } else {
-        setExtraLineSel(null);
-      }
-    };
-    const onUp = () => {
-      extraDraggingRef.current = false;
-      document.removeEventListener("mousemove", onMove);
-      document.removeEventListener("mouseup", onUp);
-    };
-    document.addEventListener("mousemove", onMove);
-    document.addEventListener("mouseup", onUp);
-  };
-  // Backspace/Delete/typing/Escape/copy while a cross-line range is selected. Nothing has
-  // focus during that range (we blur to kill native selection), so these land on document.
-  useEffect(() => {
-    if (!extraLineSel) return;
-    const onKey = (e) => {
-      const lines = (editor.extra || "").split("\n");
-      const { start, end } = extraLineSel;
-      const collapseTo = (index, pos) => { setExtraLineSel(null); extraPendingFocusRef.current = { index, pos }; };
-      if (e.key === "Escape") { setExtraLineSel(null); return; }
-      const isCopy = (e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "c";
-      const isCut = (e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "x";
-      if (isCopy || isCut) {
-        e.preventDefault();
-        const text = lines.slice(start, end + 1).join("\n");
-        if (navigator.clipboard) navigator.clipboard.writeText(text).catch(() => {});
-        if (isCopy) return;
-      }
-      if (isCut || e.key === "Backspace" || e.key === "Delete" || e.key === "Enter") {
-        e.preventDefault();
-        const next = [...lines.slice(0, start), "", ...lines.slice(end + 1)];
-        upd({ extra: next.join("\n") });
-        collapseTo(start, 0);
-        return;
-      }
-      if (e.key.length === 1 && !e.metaKey && !e.ctrlKey && !e.altKey) {
-        e.preventDefault();
-        const next = [...lines.slice(0, start), e.key, ...lines.slice(end + 1)];
-        upd({ extra: next.join("\n") });
-        collapseTo(start, 1);
-      }
-    };
-    document.addEventListener("keydown", onKey);
-    return () => document.removeEventListener("keydown", onKey);
-  }, [extraLineSel, editor && editor.extra]);
-  // clicking outside the extra-description editor while a range is selected clears it (and
-  // exits edit mode, matching the normal click-away behavior it's standing in for)
-  useEffect(() => {
-    if (!extraLineSel) return;
-    const onDocDown = (e) => {
-      const root = extraContainerRef.current;
-      if (root && !root.contains(e.target)) { setExtraLineSel(null); setExtraEditing(false); }
-    };
-    document.addEventListener("mousedown", onDocDown);
-    return () => document.removeEventListener("mousedown", onDocDown);
-  }, [extraLineSel]);
-  useEffect(() => { setExtraLineSel(null); }, [editor && editor.id, extraEditing]);
-  const extraLineMarker = (line) => {
-    const raw = line || "";
-    const h = raw.match(/^(#{1,2})\s+(.*)$/);
-    if (h) return { level: h[1].length, prefix: h[1] + " ", text: h[2] };
-    // Numbered-list rows: the "N. " is a fixed, non-editable label (like the heading's "#"),
-    // so the cursor can never land in front of the number and start typing there.
-    const n = raw.match(/^(\d+)\.\s(.*)$/);
-    if (n) return { level: 0, num: n[1], prefix: n[1] + ". ", text: n[2] };
-    return null;
-  };
-  const extraAutoResize = (el) => {
-    if (!el) return;
-    el.style.height = "auto";
-    el.style.height = el.scrollHeight + "px";
-  };
-  useEffect(() => {
-    const pf = extraPendingFocusRef.current;
-    if (!pf) return;
-    extraPendingFocusRef.current = null;
-    const el = extraLineRefs.current[pf.index];
-    if (el) {
-      el.focus();
-      const p = Math.max(0, Math.min(pf.pos ?? 0, el.value.length));
-      const endP = pf.selEnd != null ? Math.min(pf.selEnd, el.value.length) : p;
-      try { el.setSelectionRange(p, endP); } catch {}
-    }
-  }, [editor && editor.extra]);
-  useEffect(() => {
-    if (!extraEditing) return;
-    const i = extraEditTargetRef.current;
-    extraEditTargetRef.current = null;
-    if (i == null) return;
-    const el = extraLineRefs.current[i];
-    if (el) { el.focus(); const p = el.value.length; try { el.setSelectionRange(p, p); } catch {} }
-  }, [extraEditing]);
-  const onExtraLineChange = (i, displayVal) => {
-    const lines = (editor.extra || "").split("\n");
-    const marker = extraLineMarker(lines[i] || "");
-    lines[i] = marker ? marker.prefix + displayVal : displayVal;
-    upd({ extra: lines.join("\n") });
-  };
-  // shared by all the formatting toolbar buttons - they act on whichever line was last focused
-  const extraApplyLineMarker = (prefix) => {
-    const i = extraFocusedLineRef.current;
-    const lines = (editor.extra || "").split("\n");
-    const raw = lines[i] || "";
-    const stripped = raw.replace(/^(#{1,2}\s+|-\s\[[ xX]\]\s+|-\s+|>\s+|\d+\.\s+)/, "");
-    const already = raw.length !== stripped.length && raw.slice(0, raw.length - stripped.length) === prefix;
-    lines[i] = already ? stripped : prefix + stripped;
-    upd({ extra: lines.join("\n") });
-    extraPendingFocusRef.current = { index: i, pos: 0 };
-  };
-  const extraLinePrefix = (prefix) => extraApplyLineMarker(prefix);
-  const extraNumberedList = () => {
-    const i = extraFocusedLineRef.current;
-    const lines = (editor.extra || "").split("\n");
-    const prev = i > 0 ? lines[i - 1] : "";
-    const m = (prev || "").match(/^(\d+)\.\s/);
-    extraApplyLineMarker(`${m ? parseInt(m[1], 10) + 1 : 1}. `);
-  };
-  const extraWrapSelection = (before, after = before) => {
-    const i = extraFocusedLineRef.current;
-    const input = extraLineRefs.current[i]; if (!input) return;
-    const lines = (editor.extra || "").split("\n");
-    const raw = lines[i] || "";
-    const marker = extraLineMarker(raw);
-    const prefixLen = marker ? marker.prefix.length : 0;
-    const s = input.selectionStart, e = input.selectionEnd;
-    const rawS = s + prefixLen, rawE = e + prefixLen;
-    lines[i] = raw.slice(0, rawS) + before + raw.slice(rawS, rawE) + after + raw.slice(rawE);
-    upd({ extra: lines.join("\n") });
-    extraPendingFocusRef.current = { index: i, pos: s + before.length, selEnd: e + before.length };
-  };
-  const extraInsertLink = () => {
-    const i = extraFocusedLineRef.current;
-    const input = extraLineRefs.current[i]; if (!input) return;
-    const lines = (editor.extra || "").split("\n");
-    const raw = lines[i] || "";
-    const marker = extraLineMarker(raw);
-    const prefixLen = marker ? marker.prefix.length : 0;
-    const s = input.selectionStart, e = input.selectionEnd;
-    const rawS = s + prefixLen, rawE = e + prefixLen;
-    const label = raw.slice(rawS, rawE) || "text";
-    lines[i] = raw.slice(0, rawS) + `[${label}](url)` + raw.slice(rawE);
-    upd({ extra: lines.join("\n") });
-    const from = s + label.length + 3;
-    extraPendingFocusRef.current = { index: i, pos: from, selEnd: from + 3 };
-  };
-  const extraInsertDivider = () => {
-    const i = extraFocusedLineRef.current;
-    const lines = (editor.extra || "").split("\n");
-    const next = [...lines.slice(0, i + 1), "---", "", ...lines.slice(i + 1)];
-    upd({ extra: next.join("\n") });
-    extraPendingFocusRef.current = { index: i + 2, pos: 0 };
-  };
-  // Notion/Keep-style smart lists + block split/merge, all scoped to one line's textarea.
-  const extraLineKeyDown = (i, e) => {
-    const input = e.currentTarget;
-    const lines = (editor.extra || "").split("\n");
-    const raw = lines[i] || "";
-    const marker = extraLineMarker(raw);
-    const prefixLen = marker ? marker.prefix.length : 0;
-
-    if (e.key === "Enter") {
-      e.preventDefault();
-      if (input.selectionStart !== input.selectionEnd) return;
-      const rawPos = input.selectionStart + prefixLen;
-      const beforeRaw = raw.slice(0, rawPos), afterRaw = raw.slice(rawPos);
-      const numMatch = beforeRaw.match(/^(\d+)\.\s/);
-      const checkMatch = beforeRaw.match(/^-\s\[[ xX]\]\s/);
-      const bulletMatch = !checkMatch && beforeRaw.match(/^-\s/);
-      const listMarker = numMatch ? `${parseInt(numMatch[1], 10) + 1}. ` : checkMatch ? "- [ ] " : bulletMatch ? "- " : null;
-      if (listMarker) {
-        const bare = (numMatch || checkMatch || bulletMatch)[0];
-        if (beforeRaw === bare && afterRaw === "") {
-          const next = [...lines]; next[i] = "";
-          upd({ extra: next.join("\n") });
-          extraPendingFocusRef.current = { index: i, pos: 0 };
-          return;
-        }
-        const next = [...lines];
-        next[i] = beforeRaw;
-        next.splice(i + 1, 0, listMarker + afterRaw);
-        if (numMatch) {
-          let expected = parseInt(numMatch[1], 10) + 2;
-          for (let k = i + 2; k < next.length; k++) {
-            const m = next[k].match(/^(\d+)\.\s/);
-            if (!m) break;
-            next[k] = next[k].replace(/^\d+\./, String(expected) + ".");
-            expected++;
-          }
-        }
-        upd({ extra: next.join("\n") });
-        extraPendingFocusRef.current = { index: i + 1, pos: 0 };
-        return;
-      }
-      const next = [...lines];
-      next[i] = beforeRaw;
-      next.splice(i + 1, 0, afterRaw);
-      upd({ extra: next.join("\n") });
-      extraPendingFocusRef.current = { index: i + 1, pos: 0 };
-      return;
-    }
-
-    if (e.key === "Backspace") {
-      if (input.selectionStart !== input.selectionEnd || input.selectionStart !== 0) return;
-      e.preventDefault();
-      if (marker && marker.text === "") {
-        // an empty heading just converted - revert it to plain "#" text so it can keep being edited/deleted
-        const next = [...lines]; next[i] = "#".repeat(marker.level);
-        upd({ extra: next.join("\n") });
-        extraPendingFocusRef.current = { index: i, pos: marker.level };
-        return;
-      }
-      if (i === 0) return;
-      const next = [...lines];
-      const prevRaw = next[i - 1] || "";
-      const prevMarker = extraLineMarker(prevRaw);
-      next[i - 1] = prevRaw + raw;
-      next.splice(i, 1);
-      upd({ extra: next.join("\n") });
-      extraPendingFocusRef.current = { index: i - 1, pos: prevMarker ? prevRaw.length - prevMarker.prefix.length : prevRaw.length };
-      return;
-    }
-
-    if (e.key === "ArrowUp" && i > 0) { e.preventDefault(); extraPendingFocusRef.current = { index: i - 1, pos: input.selectionStart }; return; }
-    if (e.key === "ArrowDown" && i < lines.length - 1) { e.preventDefault(); extraPendingFocusRef.current = { index: i + 1, pos: input.selectionStart }; return; }
-  };
-  // clicking into the rendered read-view: guess which block was clicked by vertical
-  // position among its rendered children, then map proportionally onto the source lines
-  const extraClickToEdit = (e) => {
-    const container = e.currentTarget;
-    const children = Array.from(container.children || []);
-    let blockIdx = 0;
-    for (let k = 0; k < children.length; k++) {
-      const r = children[k].getBoundingClientRect();
-      if (e.clientY >= r.top) blockIdx = k; else break;
-    }
-    const totalLines = (editor.extra || "").split("\n").length;
-    const totalBlocks = Math.max(1, children.length);
-    extraEditTargetRef.current = Math.max(0, Math.min(totalLines - 1, Math.round((blockIdx / totalBlocks) * totalLines)));
-    setExtraEditing(true);
+  // The extra-description editor (TipTap) instance, handed up by <MarkdownEditor> so the
+  // toolbar can run its commands. extraTick re-renders on each change for active states.
+  const extraEdRef = useRef(null);
+  const [, setExtraTick] = useState(0);
+  const onExtraEditor = useCallback((ed) => { extraEdRef.current = ed; setExtraTick((t) => t + 1); }, []);
+  const extraCmd = (fn) => { const ed = extraEdRef.current; if (ed) fn(ed.chain().focus()).run(); };
+  const extraActive = (name, attrs) => { const ed = extraEdRef.current; return !!(ed && ed.isActive(name, attrs)); };
+  const [extraLinkDraft, setExtraLinkDraft] = useState(null); // null = link box closed
+  const applyExtraLink = () => {
+    const ed = extraEdRef.current;
+    const url = (extraLinkDraft || "").trim();
+    setExtraLinkDraft(null);
+    if (!ed) return;
+    if (!url) { ed.chain().focus().extendMarkRange("link").unsetLink().run(); return; }
+    const href = /^[a-z][a-z0-9+.-]*:/i.test(url) ? url : "https://" + url;
+    if (ed.state.selection.empty && !ed.isActive("link"))
+      ed.chain().focus().insertContent({ type: "text", text: url, marks: [{ type: "link", attrs: { href } }] }).run();
+    else ed.chain().focus().extendMarkRange("link").setLink({ href }).run();
   };
   const [newChecklistItem, setNewChecklistItem] = useState("");
   const addChecklistItem = () => {
@@ -2440,7 +2317,12 @@ export default function ShiftApp() {
         ::-webkit-scrollbar-track { background: transparent; }
         button { font-family: inherit; color: inherit; }
         input, textarea, select { font-family: inherit; color: ${C.text}; }
-        input:focus-visible, textarea:focus-visible, button:focus-visible { outline: 2px solid ${C.personal}; outline-offset: 1px; }
+        input:focus-visible, textarea:focus-visible { outline: 2px solid ${C.personal}; outline-offset: 1px; }
+        /* no focus ring on clicked/tapped buttons, links or dropdowns; it only comes back
+           while the keyboard (Tab) is being used to move around - see the kbd-nav effect */
+        button:focus, a:focus, select:focus, [tabindex]:focus { outline: none; }
+        .kbd-nav button:focus-visible, .kbd-nav a:focus-visible, .kbd-nav select:focus-visible,
+        .kbd-nav [tabindex]:focus-visible { outline: 2px solid ${C.personal}; outline-offset: 1px; }
         input, textarea { outline: none; }
         .nav { transition: background 120ms ease; }
         .nav:hover { background: ${C.raised}; }
@@ -4105,14 +3987,21 @@ export default function ShiftApp() {
                   </div>
                 )}
 
-                <textarea ref={contentRef} style={{ ...st.contentIn, ...rtl(editor.content) }} placeholder="Take a note…"
-                  value={editor.content} onChange={(e) => upd({ content: e.target.value })} />
+                <div style={{ position: "relative", display: "flex", flexDirection: "column" }}>
+                  <textarea ref={contentRef} style={{ ...st.contentIn, ...rtl(editor.content), paddingBottom: 30 }} placeholder="Take a note…"
+                    value={editor.content} onChange={(e) => upd({ content: e.target.value })} />
+                  <button style={{ ...st.undoBtn, position: "absolute", right: 18, bottom: 6, ...(undoHist.content.length ? {} : st.undoBtnOff) }}
+                    title="Undo" disabled={!undoHist.content.length}
+                    onMouseDown={(e) => e.preventDefault()} onClick={() => undoField("content")}>
+                    <Undo2 size={12} /> Undo
+                  </button>
+                </div>
 
                 {/* extra description — one box: rendered by default, click to edit, toolbar buttons instead of typed syntax. Lives above the tabs. */}
                 <div>
                   {!extraOpen && (
                     <button style={editor.extra && editor.extra.trim() ? st.extraBoxFilled : st.extraBoxEmpty}
-                      onClick={() => { setExtraOpen(true); if (!(editor.extra && editor.extra.trim())) setExtraEditing(true); }}>
+                      onClick={() => setExtraOpen(true)}>
                       {editor.extra && editor.extra.trim() ? (
                         <span style={{ ...rtl(editor.extra), color: C.text }}>{editor.extra.trim().slice(0, 80)}{editor.extra.trim().length > 80 ? "…" : ""}</span>
                       ) : (
@@ -4121,76 +4010,68 @@ export default function ShiftApp() {
                     </button>
                   )}
                   {extraOpen && (
-                    <button style={st.collapseBtn} onClick={() => { setExtraOpen(false); setExtraEditing(false); }}>
+                    <button style={st.collapseBtn} onClick={() => { setExtraOpen(false); setExtraLinkDraft(null); }}>
                       <ChevronDown size={11} /> Extra description
                     </button>
                   )}
                   {extraOpen && (
-                    extraEditing || !(editor.extra && editor.extra.trim()) ? (
-                      <>
-                        <div style={{ display: "flex", gap: 3, flexWrap: "wrap", marginTop: 6 }}>
-                          <button style={st.mdBtn} title="Heading" onMouseDown={(e) => e.preventDefault()} onClick={() => extraLinePrefix("# ")}><Heading1 size={13} /></button>
-                          <button style={st.mdBtn} title="Subheading" onMouseDown={(e) => e.preventDefault()} onClick={() => extraLinePrefix("## ")}><Heading2 size={13} /></button>
-                          <button style={st.mdBtn} title="Bold" onMouseDown={(e) => e.preventDefault()} onClick={() => extraWrapSelection("**")}><Bold size={13} /></button>
-                          <button style={st.mdBtn} title="Italic" onMouseDown={(e) => e.preventDefault()} onClick={() => extraWrapSelection("*")}><Italic size={13} /></button>
-                          <button style={st.mdBtn} title="Bullet list" onMouseDown={(e) => e.preventDefault()} onClick={() => extraLinePrefix("- ")}><List size={13} /></button>
-                          <button style={st.mdBtn} title="Numbered list" onMouseDown={(e) => e.preventDefault()} onClick={() => extraNumberedList()}><span style={{ fontSize: 12, fontWeight: 700, width: 13, textAlign: "center" }}>1.</span></button>
-                          <button style={st.mdBtn} title="Checklist" onMouseDown={(e) => e.preventDefault()} onClick={() => extraLinePrefix("- [ ] ")}><CheckSquare size={13} /></button>
-                          <button style={st.mdBtn} title="Quote" onMouseDown={(e) => e.preventDefault()} onClick={() => extraLinePrefix("> ")}><Quote size={13} /></button>
-                          <button style={st.mdBtn} title="Code" onMouseDown={(e) => e.preventDefault()} onClick={() => extraWrapSelection("`")}><Code size={13} /></button>
-                          <button style={st.mdBtn} title="Link" onMouseDown={(e) => e.preventDefault()} onClick={extraInsertLink}><LinkIcon size={13} /></button>
-                          <button style={st.mdBtn} title="Divider" onMouseDown={(e) => e.preventDefault()} onClick={extraInsertDivider}><Minus size={13} /></button>
-                        </div>
-                        <div
-                          style={{ ...st.teachIn, ...rtl(editor.extra), marginTop: 6, width: "100%", minHeight: 220,
-                            display: "flex", flexDirection: "column", gap: 2 }}
-                          onBlur={() => {
-                            setTimeout(() => {
-                              const root = extraContainerRef.current;
-                              if (root && !root.contains(document.activeElement)) setExtraEditing(false);
-                            }, 0);
-                          }}
-                          ref={extraContainerRef}>
-                          {(editor.extra || "").split("\n").map((line, i, arr) => {
-                            const marker = extraLineMarker(line);
-                            const level = marker ? marker.level : 0;
-                            const fontSize = level === 1 ? 19 : level === 2 ? 16 : 12.5;
-                            const fontWeight = level ? 700 : 400;
-                            const selected = extraLineSel && i >= extraLineSel.start && i <= extraLineSel.end;
-                            return (
-                              <div key={i} onMouseDown={() => extraLineMouseDown(i)}
-                                style={{ borderRadius: 4, background: selected ? C.work + "33" : "transparent",
-                                  display: "flex", alignItems: "flex-start", gap: 6 }}>
-                                {marker && marker.num != null && (
-                                  <span style={{ flexShrink: 0, padding: "1px 0", fontSize: 12.5, color: C.dim, userSelect: "none" }}>
-                                    {marker.num}.
-                                  </span>
-                                )}
-                                <textarea rows={1}
-                                  ref={(el) => { extraLineRefs.current[i] = el; if (el) extraAutoResize(el); }}
-                                  value={marker ? marker.text : line}
-                                  placeholder={i === 0 && arr.length === 1 && !line ? "Write more detail…" : ""}
-                                  autoFocus={extraEditing && i === (extraEditTargetRef.current ?? arr.length - 1)}
-                                  style={{
-                                    width: "100%", resize: "none", overflow: "hidden", border: "none", outline: "none",
-                                    background: "transparent", color: C.text, fontFamily: "inherit",
-                                    fontSize, fontWeight, lineHeight: level ? 1.35 : 1.5,
-                                    padding: level === 1 ? "6px 0 2px" : level === 2 ? "4px 0 2px" : "1px 0",
-                                  }}
-                                  onFocus={() => { extraFocusedLineRef.current = i; }}
-                                  onChange={(e) => { onExtraLineChange(i, e.target.value); extraAutoResize(e.target); }}
-                                  onKeyDown={(e) => extraLineKeyDown(i, e)} />
-                              </div>
-                            );
-                          })}
-                        </div>
-                      </>
-                    ) : (
-                      <div style={{ ...st.mdBox, ...rtl(editor.extra), marginTop: 6, cursor: "text", minHeight: 220 }}
-                        onClick={extraClickToEdit}>
-                        <Markdown text={editor.extra} />
+                    <>
+                      <div style={{ display: "flex", gap: 3, flexWrap: "wrap", marginTop: 6 }}>
+                        {[
+                          ["Heading", <Heading1 size={13} />, (c) => c.toggleHeading({ level: 1 }), ["heading", { level: 1 }]],
+                          ["Subheading", <Heading2 size={13} />, (c) => c.toggleHeading({ level: 2 }), ["heading", { level: 2 }]],
+                          ["Bold", <Bold size={13} />, (c) => c.toggleBold(), ["bold"]],
+                          ["Italic", <Italic size={13} />, (c) => c.toggleItalic(), ["italic"]],
+                          ["Bullet list", <List size={13} />, (c) => c.toggleBulletList(), ["bulletList"]],
+                          ["Numbered list", <span style={{ fontSize: 12, fontWeight: 700, width: 13, textAlign: "center" }}>1.</span>, (c) => c.toggleOrderedList(), ["orderedList"]],
+                          ["Checklist", <CheckSquare size={13} />, (c) => c.toggleTaskList(), ["taskList"]],
+                          ["Quote", <Quote size={13} />, (c) => c.toggleBlockquote(), ["blockquote"]],
+                          ["Code", <Code size={13} />, (c) => c.toggleCode(), ["code"]],
+                        ].map(([title, icon, run, active]) => (
+                          <button key={title} title={title} style={{ ...st.mdBtn, ...(extraActive(...active) ? st.mdBtnOn : {}) }}
+                            onMouseDown={(e) => e.preventDefault()} onClick={() => extraCmd(run)}>{icon}</button>
+                        ))}
+                        <button style={{ ...st.mdBtn, ...(extraActive("link") ? st.mdBtnOn : {}) }} title="Link"
+                          onMouseDown={(e) => e.preventDefault()}
+                          onClick={() => setExtraLinkDraft(extraLinkDraft !== null ? null
+                            : ((extraEdRef.current && extraEdRef.current.getAttributes("link").href) || ""))}>
+                          <LinkIcon size={13} />
+                        </button>
+                        <button style={st.mdBtn} title="Divider" onMouseDown={(e) => e.preventDefault()}
+                          onClick={() => extraCmd((c) => c.setHorizontalRule())}><Minus size={13} /></button>
+                        {(() => {
+                          const canUndo = !!(extraEdRef.current && extraEdRef.current.can().undo());
+                          return (
+                            <button style={{ ...st.undoBtn, marginLeft: "auto", ...(canUndo ? {} : st.undoBtnOff) }}
+                              title="Undo" disabled={!canUndo}
+                              onMouseDown={(e) => e.preventDefault()} onClick={() => extraCmd((c) => c.undo())}>
+                              <Undo2 size={12} /> Undo
+                            </button>
+                          );
+                        })()}
                       </div>
-                    )
+                      {extraLinkDraft !== null && (
+                        <div style={{ display: "flex", gap: 6, marginTop: 6 }}>
+                          <input autoFocus style={{ ...st.textIn, flex: 1 }} placeholder="Paste a link, then press Enter (empty removes it)"
+                            value={extraLinkDraft} onChange={(e) => setExtraLinkDraft(e.target.value)}
+                            onKeyDown={(e) => {
+                              if (e.key === "Enter") { e.preventDefault(); applyExtraLink(); }
+                              if (e.key === "Escape") { e.preventDefault(); setExtraLinkDraft(null); }
+                            }} />
+                          <button style={st.undoBtn} onClick={applyExtraLink}>Apply</button>
+                        </div>
+                      )}
+                      <div style={{ ...st.teachIn, marginTop: 6, minHeight: 220, resize: "none", cursor: "text" }}
+                        onMouseDown={(e) => {
+                          // clicking the empty space under the text still puts the cursor in the editor
+                          const ed = extraEdRef.current;
+                          if (ed && e.target === e.currentTarget) { e.preventDefault(); ed.commands.focus("end"); }
+                        }}>
+                        <MarkdownEditor key={undoEpoch} value={editor.extra || ""} onEditor={onExtraEditor}
+                          onChange={(md) => upd({ extra: md })}
+                          placeholder="Write more detail… Type # for a heading, - for a list, 1. for numbers" />
+                      </div>
+                    </>
                   )}
                 </div>
 
@@ -5086,9 +4967,9 @@ const st = {
   newBtn: { display: "flex", alignItems: "center", justifyContent: "center", gap: 6, background: C.personal,
     color: C.ink, border: "none", borderRadius: 9, padding: "9px 12px", fontSize: 13, fontWeight: 600, cursor: "pointer" },
   fileBanner: { display: "flex", alignItems: "center", gap: 7, background: "rgba(224,179,65,0.10)", color: C.warn,
-    border: "1px solid rgba(224,179,65,0.25)", borderRadius: 9, padding: "8px 10px", fontSize: 12, cursor: "pointer", marginTop: 8 },
+    borderWidth: 1, borderStyle: "solid", borderColor: "rgba(224,179,65,0.25)", borderRadius: 9, padding: "8px 10px", fontSize: 12, cursor: "pointer", marginTop: 8 },
   suggestBanner: { display: "flex", alignItems: "center", gap: 7, background: C.raised, color: C.dim,
-    border: `1px solid ${C.line}`, borderRadius: 9, padding: "7px 10px", fontSize: 12, cursor: "pointer", marginTop: 8 },
+    borderWidth: 1, borderStyle: "solid", borderColor: C.line, borderRadius: 9, padding: "7px 10px", fontSize: 12, cursor: "pointer", marginTop: 8 },
   nav: { flex: 1, overflowY: "auto", marginTop: 18, marginRight: -6, paddingRight: 4 },
   navRow: { display: "flex", alignItems: "center", gap: 9, padding: "7px 9px", borderRadius: 7, cursor: "pointer", fontSize: 13 },
   subRow: { display: "flex", alignItems: "center", gap: 9, padding: "6px 9px 6px 22px", borderRadius: 7, cursor: "pointer", fontSize: 12.5, color: C.dim },
@@ -5097,13 +4978,13 @@ const st = {
   emoji: { fontSize: 12, width: 15, textAlign: "center" },
   swatch: { width: 9, height: 9, borderRadius: 3, flexShrink: 0, cursor: "pointer" },
   secHead: { fontSize: 11, color: C.dimmer, padding: "0 9px 6px" },
-  footBtn: { display: "flex", alignItems: "center", gap: 7, background: "none", border: `1px solid ${C.line}`,
+  footBtn: { display: "flex", alignItems: "center", gap: 7, background: "none", borderWidth: 1, borderStyle: "solid", borderColor: C.line,
     borderRadius: 8, padding: "8px 10px", fontSize: 12, color: C.dim, cursor: "pointer", marginTop: 7 },
 
   main: { flex: 1, display: "flex", flexDirection: "column", minWidth: 0, width: "100%" },
   top: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap",
     padding: "12px 16px", borderBottom: `1px solid ${C.lineSoft}` },
-  searchBox: { display: "flex", alignItems: "center", gap: 8, background: C.surface, border: `1px solid ${C.line}`,
+  searchBox: { display: "flex", alignItems: "center", gap: 8, background: C.surface, borderWidth: 1, borderStyle: "solid", borderColor: C.line,
     borderRadius: 9, padding: "8px 12px", width: 280, maxWidth: "100%", minWidth: 0 },
   searchIn: { border: "none", background: "transparent", fontSize: 13, width: "100%" },
   crumb: { fontSize: 13, color: C.dim },
@@ -5118,7 +4999,7 @@ const st = {
   boardCol: { minWidth: 220, width: 220, flexShrink: 0, background: C.raised, borderRadius: 10, padding: 8,
     maxHeight: "calc(100vh - 160px)", overflowY: "auto" },
   boardColHead: { display: "flex", alignItems: "center", gap: 6, padding: "4px 4px 8px" },
-  boardCard: { background: C.surface, border: `1px solid ${C.line}`, borderRadius: 8, padding: 8, cursor: "grab" },
+  boardCard: { background: C.surface, borderWidth: 1, borderStyle: "solid", borderColor: C.line, borderRadius: 8, padding: 8, cursor: "grab" },
   empty: { display: "flex", flexDirection: "column", alignItems: "center", textAlign: "center", padding: "70px 20px", gap: 4 },
   emptyT: { fontSize: 16, fontWeight: 600, margin: "10px 0 0" },
   emptyB: { fontSize: 13, color: C.dimmer, margin: 0 },
@@ -5126,54 +5007,58 @@ const st = {
   masonryRow: { display: "flex", gap: 14, alignItems: "flex-start" },
   masonryCol: { flex: 1, minWidth: 0, display: "flex", flexDirection: "column" },
   card: { position: "relative", overflow: "hidden", breakInside: "avoid", marginBottom: 16, borderRadius: 12,
-    border: "1px solid", padding: "13px 14px", cursor: "pointer" },
+    borderWidth: 1, borderStyle: "solid", borderColor: "currentColor", padding: "13px 14px", cursor: "pointer" },
   bigIcon: { position: "absolute", right: -6, bottom: -6, opacity: 0.13, pointerEvents: "none" },
   cardTop: { display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 8, marginBottom: 8 },
   chips: { display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center" },
   domChip: { display: "inline-flex", alignItems: "center", gap: 4, fontSize: 10.5, fontWeight: 600,
-    border: "1px solid", borderRadius: 6, padding: "2px 7px" },
+    borderWidth: 1, borderStyle: "solid", borderColor: "currentColor", borderRadius: 6, padding: "2px 7px" },
   chip: { display: "inline-flex", alignItems: "center", gap: 4, fontSize: 10.5, color: C.dim,
     background: "rgba(255,255,255,0.04)", borderRadius: 6, padding: "2px 7px" },
   cardTitle: { fontSize: 14.5, fontWeight: 600, margin: "0 0 5px", position: "relative" },
   cardBody: { fontSize: 12.5, lineHeight: 1.55, color: C.dim, margin: 0, whiteSpace: "pre-wrap", position: "relative" },
   trigPill: { display: "inline-flex", alignItems: "center", gap: 5, marginTop: 9, fontSize: 11,
-    background: "rgba(255,255,255,0.05)", border: `1px solid ${C.line}`, borderRadius: 6, padding: "3px 8px", position: "relative" },
-  labelPill: { display: "inline-flex", alignItems: "center", gap: 4, fontSize: 10.5, border: "1px solid",
+    background: "rgba(255,255,255,0.05)", borderWidth: 1, borderStyle: "solid", borderColor: C.line, borderRadius: 6, padding: "3px 8px", position: "relative" },
+  labelPill: { display: "inline-flex", alignItems: "center", gap: 4, fontSize: 10.5, borderWidth: 1, borderStyle: "solid", borderColor: "currentColor",
     borderRadius: 20, padding: "2px 8px" },
 
   overlay: { position: "fixed", inset: 0, background: "rgba(8,11,14,0.72)", backdropFilter: "blur(3px)",
     display: "flex", alignItems: "center", justifyContent: "center", zIndex: 50, padding: 12 },
   overlayCloseBtn: { position: "fixed", top: "calc(env(safe-area-inset-top, 0px) + 14px)", right: 16, zIndex: 55,
     width: 34, height: 34, borderRadius: "50%", display: "flex", alignItems: "center", justifyContent: "center",
-    background: "rgba(18,23,28,0.85)", border: `1px solid ${C.line}`, color: C.text, cursor: "pointer" },
-  modal: { background: C.surface, border: `1px solid ${C.line}`, borderRadius: 14, width: 530, maxWidth: "96vw",
+    background: "rgba(18,23,28,0.85)", borderWidth: 1, borderStyle: "solid", borderColor: C.line, color: C.text, cursor: "pointer" },
+  modal: { background: C.surface, borderWidth: 1, borderStyle: "solid", borderColor: C.line, borderRadius: 14, width: 530, maxWidth: "96vw",
     maxHeight: "90vh", overflowY: "auto", overflowX: "hidden", padding: "16px 16px 18px", display: "flex", flexDirection: "column", gap: 11,
     boxShadow: "0 24px 70px rgba(0,0,0,0.5)" },
   modalHead: { display: "flex", alignItems: "center", justifyContent: "space-between" },
   modalTitle: { fontSize: 17, fontWeight: 600, margin: 0 },
   headBar: { display: "flex", alignItems: "center", gap: 6, marginBottom: 4 },
   headIconBtn: { display: "flex", alignItems: "center", justifyContent: "center", width: 28, height: 28,
-    border: `1px solid ${C.line}`, borderRadius: 8, background: "transparent", color: C.dim, cursor: "pointer", flexShrink: 0 },
+    borderWidth: 1, borderStyle: "solid", borderColor: C.line, borderRadius: 8, background: "transparent", color: C.dim, cursor: "pointer", flexShrink: 0 },
   mdBtn: { display: "flex", alignItems: "center", justifyContent: "center", width: 26, height: 26,
-    border: `1px solid ${C.line}`, borderRadius: 6, background: C.raised, color: C.dim, cursor: "pointer" },
+    borderWidth: 1, borderStyle: "solid", borderColor: C.line, borderRadius: 6, background: C.raised, color: C.dim, cursor: "pointer" },
+  undoBtn: { display: "flex", alignItems: "center", gap: 4, height: 26, padding: "0 8px", fontSize: 11.5,
+    borderWidth: 1, borderStyle: "solid", borderColor: C.line, borderRadius: 6, background: C.raised, color: C.dim, cursor: "pointer", fontFamily: "inherit" },
+  undoBtnOff: { opacity: 0.4, cursor: "default" },
+  mdBtnOn: { background: "rgba(124,160,232,0.18)", borderColor: C.work, color: C.text },
   moreIconRow: { display: "flex", gap: 4, flexWrap: "wrap", margin: "2px 0 4px" },
   morePopover: { position: "absolute", top: "calc(100% + 4px)", left: 0, zIndex: 20, minWidth: 240, maxWidth: 320,
-    maxHeight: 280, overflowY: "auto", background: C.raised, border: `1px solid ${C.line}`, borderRadius: 10,
+    maxHeight: 280, overflowY: "auto", background: C.raised, borderWidth: 1, borderStyle: "solid", borderColor: C.line, borderRadius: 10,
     padding: 10, boxShadow: "0 8px 24px rgba(0,0,0,0.4)" },
   moreDot: { position: "absolute", top: 3, right: 3, width: 5, height: 5, borderRadius: 3, background: C.personal },
   titleRow: { display: "flex", alignItems: "center", gap: 6 },
   titleIn: { flex: 1, border: "none", background: "transparent", fontSize: 17, fontWeight: 600, padding: "2px 0" },
   addTitle: { alignSelf: "flex-start", display: "flex", alignItems: "center", gap: 4, background: "none",
-    border: `1px dashed ${C.line}`, borderRadius: 20, padding: "3px 10px", fontSize: 11, color: C.dimmer, cursor: "pointer" },
+    borderWidth: 1, borderStyle: "dashed", borderColor: C.line, borderRadius: 20, padding: "3px 10px", fontSize: 11, color: C.dimmer, cursor: "pointer" },
   contentIn: { border: "none", background: "transparent", fontSize: 13.5, lineHeight: 1.6, minHeight: 110, resize: "vertical" },
-  drop: { display: "flex", flexDirection: "column", alignItems: "center", gap: 7, border: `1.5px dashed ${C.line}`,
+  drop: { display: "flex", flexDirection: "column", alignItems: "center", gap: 7, borderWidth: 1.5, borderStyle: "dashed", borderColor: C.line,
     borderRadius: 10, padding: "20px 12px", fontSize: 12, color: C.dimmer, cursor: "pointer" },
 
-  sectionBox: { background: C.raised, border: `1px solid ${C.line}`, borderRadius: 10, padding: "11px 13px",
+  sectionBox: { background: C.raised, borderWidth: 1, borderStyle: "solid", borderColor: C.line, borderRadius: 10, padding: "11px 13px",
     display: "flex", flexDirection: "column", gap: 8 },
-  trigBox: { background: "rgba(224,179,65,0.06)", border: "1px solid rgba(224,179,65,0.22)", borderRadius: 10,
+  trigBox: { background: "rgba(224,179,65,0.06)", borderWidth: 1, borderStyle: "solid", borderColor: "rgba(224,179,65,0.22)", borderRadius: 10,
     padding: "11px 13px", display: "flex", flexDirection: "column", gap: 9 },
-  teachBox: { background: "rgba(224,179,65,0.06)", border: "1px solid rgba(224,179,65,0.22)", borderRadius: 10,
+  teachBox: { background: "rgba(224,179,65,0.06)", borderWidth: 1, borderStyle: "solid", borderColor: "rgba(224,179,65,0.22)", borderRadius: 10,
     padding: "11px 13px", display: "flex", flexDirection: "column", gap: 8 },
   sectionHead: { display: "flex", alignItems: "center", gap: 6, fontSize: 12.5, fontWeight: 600 },
   reason: { fontSize: 12, color: C.dimmer, lineHeight: 1.5, margin: 0, fontStyle: "italic" },
@@ -5182,99 +5067,99 @@ const st = {
   link: { alignSelf: "flex-start", background: "none", border: "none", color: C.work, fontSize: 11.5,
     cursor: "pointer", padding: 0, textDecoration: "underline" },
   correct: { display: "flex", flexWrap: "wrap", gap: 7, alignItems: "center" },
-  sel: { background: C.ink, border: `1px solid ${C.line}`, borderRadius: 7, padding: "6px 8px", fontSize: 12 },
+  sel: { background: C.ink, borderWidth: 1, borderStyle: "solid", borderColor: C.line, borderRadius: 7, padding: "6px 8px", fontSize: 12 },
   selActive: { borderColor: C.work, color: C.work },
   sugTitle: { fontSize: 13.5, fontWeight: 600, margin: 0 },
   sugBody: { fontSize: 12.5, lineHeight: 1.55, color: C.dim, margin: 0, whiteSpace: "pre-wrap" },
-  teachIn: { background: C.ink, border: `1px solid ${C.line}`, borderRadius: 8, padding: "8px 10px",
+  teachIn: { background: C.ink, borderWidth: 1, borderStyle: "solid", borderColor: C.line, borderRadius: 8, padding: "8px 10px",
     fontSize: 12.5, minHeight: 54, resize: "vertical" },
 
   segRow: { display: "flex", gap: 6 },
-  seg: { display: "flex", alignItems: "center", gap: 5, background: "transparent", border: `1px solid ${C.line}`,
+  seg: { display: "flex", alignItems: "center", gap: 5, background: "transparent", borderWidth: 1, borderStyle: "solid", borderColor: C.line,
     borderRadius: 7, padding: "5px 11px", fontSize: 12, color: C.dim, cursor: "pointer" },
   segOn: { background: C.warn, borderColor: C.warn, color: C.ink, fontWeight: 600 },
-  dateIn: { background: C.ink, border: `1px solid ${C.line}`, borderRadius: 8, padding: "8px 10px", fontSize: 12.5, colorScheme: "dark" },
-  textIn: { flex: 1, background: C.ink, border: `1px solid ${C.line}`, borderRadius: 8, padding: "8px 10px", fontSize: 12.5 },
-  mapBtn: { display: "flex", alignItems: "center", gap: 5, background: C.raised, border: `1px solid ${C.line}`,
+  dateIn: { background: C.ink, borderWidth: 1, borderStyle: "solid", borderColor: C.line, borderRadius: 8, padding: "8px 10px", fontSize: 12.5, colorScheme: "dark" },
+  textIn: { flex: 1, background: C.ink, borderWidth: 1, borderStyle: "solid", borderColor: C.line, borderRadius: 8, padding: "8px 10px", fontSize: 12.5 },
+  mapBtn: { display: "flex", alignItems: "center", gap: 5, background: C.raised, borderWidth: 1, borderStyle: "solid", borderColor: C.line,
     borderRadius: 8, padding: "8px 12px", fontSize: 12, color: C.dim, cursor: "pointer" },
-  mapFrame: { position: "relative", overflow: "hidden", borderRadius: 10, border: `1px solid ${C.line}`,
+  mapFrame: { position: "relative", overflow: "hidden", borderRadius: 10, borderWidth: 1, borderStyle: "solid", borderColor: C.line,
     background: C.raised, cursor: "grab", userSelect: "none" },
   mapPin: { position: "absolute", left: "50%", top: "50%", transform: "translate(-50%,-100%)", pointerEvents: "none" },
   mapZoom: { position: "absolute", right: 8, top: 8, display: "flex", flexDirection: "column", gap: 4 },
   mapZoomBtn: { width: 26, height: 26, display: "flex", alignItems: "center", justifyContent: "center",
-    background: C.surface, border: `1px solid ${C.line}`, borderRadius: 6, cursor: "pointer" },
+    background: C.surface, borderWidth: 1, borderStyle: "solid", borderColor: C.line, borderRadius: 6, cursor: "pointer" },
 
   typePickRow: { display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center" },
   pickLbl: { fontSize: 11, color: C.dimmer, marginRight: 2 },
   typePick: { display: "inline-flex", alignItems: "center", gap: 5, background: "transparent",
-    border: `1px solid ${C.line}`, borderRadius: 7, padding: "4px 10px", fontSize: 11.5, color: C.dim, cursor: "pointer" },
+    borderWidth: 1, borderStyle: "solid", borderColor: C.line, borderRadius: 7, padding: "4px 10px", fontSize: 11.5, color: C.dim, cursor: "pointer" },
   typePickOn: { background: "rgba(99,201,168,0.14)", borderColor: C.personal, color: C.personal, fontWeight: 600 },
   pendBtn: { display: "inline-flex", alignItems: "center", background: "none", border: "none", cursor: "pointer",
     color: C.warn, padding: 0, marginLeft: 4 },
-  taskBox: { background: "rgba(224,179,65,0.06)", border: "1px solid rgba(224,179,65,0.22)", borderRadius: 10,
+  taskBox: { background: "rgba(224,179,65,0.06)", borderWidth: 1, borderStyle: "solid", borderColor: "rgba(224,179,65,0.22)", borderRadius: 10,
     padding: "11px 13px", display: "flex", flexDirection: "column", gap: 9 },
-  remBox: { background: "rgba(124,160,232,0.06)", border: "1px solid rgba(124,160,232,0.22)", borderRadius: 10,
+  remBox: { background: "rgba(124,160,232,0.06)", borderWidth: 1, borderStyle: "solid", borderColor: "rgba(124,160,232,0.22)", borderRadius: 10,
     padding: "11px 13px", display: "flex", flexDirection: "column", gap: 9 },
   fieldRow: { display: "flex", alignItems: "center", gap: 9, flexWrap: "wrap" },
-  qChip: { display: "inline-flex", alignItems: "center", gap: 4, background: "transparent", border: `1px solid ${C.line}`,
+  qChip: { display: "inline-flex", alignItems: "center", gap: 4, background: "transparent", borderWidth: 1, borderStyle: "solid", borderColor: C.line,
     borderRadius: 6, padding: "4px 9px", fontSize: 11, color: C.dim, cursor: "pointer" },
-  numChip: { minWidth: 28, background: "transparent", border: `1px solid ${C.line}`, borderRadius: 6,
+  numChip: { minWidth: 28, background: "transparent", borderWidth: 1, borderStyle: "solid", borderColor: C.line, borderRadius: 6,
     padding: "4px 8px", fontSize: 11, color: C.dim, cursor: "pointer" },
   numChipOn: { background: "rgba(99,201,168,0.16)", borderColor: C.personal, color: C.personal, fontWeight: 600 },
   collapseBtn: { display: "flex", alignItems: "center", gap: 5, background: "none", border: "none",
     color: C.dimmer, fontSize: 11.5, cursor: "pointer", padding: 0 },
   extraBoxEmpty: { display: "block", width: "100%", textAlign: "left", background: "transparent",
-    border: `1px dashed ${C.line}`, borderRadius: 8, padding: "10px 12px", fontSize: 12.5, cursor: "pointer" },
+    borderWidth: 1, borderStyle: "dashed", borderColor: C.line, borderRadius: 8, padding: "10px 12px", fontSize: 12.5, cursor: "pointer" },
   extraBoxFilled: { display: "block", width: "100%", textAlign: "left", background: C.raised,
-    border: `1px solid ${C.line}`, borderRadius: 8, padding: "10px 12px", fontSize: 12.5, cursor: "pointer" },
+    borderWidth: 1, borderStyle: "solid", borderColor: C.line, borderRadius: 8, padding: "10px 12px", fontSize: 12.5, cursor: "pointer" },
   critBtn: { alignSelf: "flex-start", display: "flex", alignItems: "center", gap: 6, background: "transparent",
-    border: `1px solid ${C.line}`, borderRadius: 7, padding: "5px 11px", fontSize: 11.5, color: C.dim, cursor: "pointer" },
+    borderWidth: 1, borderStyle: "solid", borderColor: C.line, borderRadius: 7, padding: "5px 11px", fontSize: 11.5, color: C.dim, cursor: "pointer" },
   critOn: { background: "rgba(224,138,124,0.16)", borderColor: C.danger, color: C.danger, fontWeight: 600 },
   critChip: { display: "inline-flex", alignItems: "center", gap: 4, fontSize: 10.5, fontWeight: 700, color: C.danger,
     background: "rgba(224,138,124,0.15)", borderRadius: 6, padding: "2px 7px" },
   doneBtn: { display: "flex", alignItems: "center", gap: 6, background: "rgba(99,201,168,0.16)", color: C.personal,
-    border: `1px solid ${C.personal}`, borderRadius: 8, padding: "8px 14px", fontSize: 12.5, fontWeight: 600, cursor: "pointer" },
+    borderWidth: 1, borderStyle: "solid", borderColor: C.personal, borderRadius: 8, padding: "8px 14px", fontSize: 12.5, fontWeight: 600, cursor: "pointer" },
   pillWrap: { display: "flex", flexWrap: "wrap", gap: 5, position: "relative" },
   groupHead: { display: "flex", alignItems: "center", gap: 6, fontSize: 11.5, color: C.dim, textTransform: "uppercase",
     letterSpacing: 0.4, margin: "4px 0 10px", paddingBottom: 6, borderBottom: `1px solid ${C.lineSoft}` },
   arrowBtn: { display: "flex", alignItems: "center", justifyContent: "center", width: 16, height: 16,
     background: "none", border: "none", color: C.dimmer, cursor: "pointer", padding: 0 },
-  relBox: { background: "rgba(99,201,168,0.06)", border: "1px solid rgba(99,201,168,0.22)", borderRadius: 10,
+  relBox: { background: "rgba(99,201,168,0.06)", borderWidth: 1, borderStyle: "solid", borderColor: "rgba(99,201,168,0.22)", borderRadius: 10,
     padding: "11px 13px", display: "flex", flexDirection: "column", gap: 9 },
-  relPill: { display: "inline-flex", alignItems: "center", gap: 5, background: C.ink, border: `1px solid ${C.line}`,
+  relPill: { display: "inline-flex", alignItems: "center", gap: 5, background: C.ink, borderWidth: 1, borderStyle: "solid", borderColor: C.line,
     borderRadius: 20, padding: "3px 7px 3px 10px", fontSize: 11, cursor: "pointer", maxWidth: 230,
     overflow: "hidden", whiteSpace: "nowrap", textOverflow: "ellipsis" },
-  relAdd: { display: "inline-flex", alignItems: "center", gap: 4, background: "none", border: `1px dashed ${C.line}`,
+  relAdd: { display: "inline-flex", alignItems: "center", gap: 4, background: "none", borderWidth: 1, borderStyle: "dashed", borderColor: C.line,
     borderRadius: 20, padding: "3px 10px", fontSize: 11, color: C.dimmer, cursor: "pointer" },
   relOption: { display: "flex", alignItems: "center", gap: 8, padding: "8px 10px", borderRadius: 8,
-    border: `1px solid ${C.line}`, background: C.raised, fontSize: 12.5, cursor: "pointer" },
+    borderWidth: 1, borderStyle: "solid", borderColor: C.line, background: C.raised, fontSize: 12.5, cursor: "pointer" },
   subList: { display: "flex", flexDirection: "column", gap: 5, marginTop: 7 },
-  subRowItem: { display: "flex", alignItems: "center", gap: 8, background: C.ink, border: `1px solid ${C.line}`,
+  subRowItem: { display: "flex", alignItems: "center", gap: 8, background: C.ink, borderWidth: 1, borderStyle: "solid", borderColor: C.line,
     borderRadius: 8, padding: "6px 9px", fontSize: 12 },
-  subCheck: { width: 15, height: 15, borderRadius: 4, border: `1px solid ${C.line}`, background: "transparent",
+  subCheck: { width: 15, height: 15, borderRadius: 4, borderWidth: 1, borderStyle: "solid", borderColor: C.line, background: "transparent",
     cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, padding: 0 },
   subCheckOn: { background: C.personal, borderColor: C.personal },
   viewRow: { display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 5, margin: "10px 0 4px" },
   viewBtn: { display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 4,
-    background: C.raised, border: `1px solid ${C.line}`, borderRadius: 8, padding: "8px 3px", color: C.dim,
+    background: C.raised, borderWidth: 1, borderStyle: "solid", borderColor: C.line, borderRadius: 8, padding: "8px 3px", color: C.dim,
     cursor: "pointer", minWidth: 0, overflow: "hidden", lineHeight: 1.1 },
   viewBtnOn: { background: "rgba(99,201,168,0.14)", borderColor: C.personal, color: C.personal },
   calHead: { display: "flex", alignItems: "center", gap: 8, marginBottom: 14, flexWrap: "wrap" },
-  agendaDay: { border: "1px solid", borderRadius: 10, background: C.surface, padding: "9px 11px",
+  agendaDay: { borderWidth: 1, borderStyle: "solid", borderColor: "currentColor", borderRadius: 10, background: C.surface, padding: "9px 11px",
     display: "flex", flexDirection: "column", gap: 6 },
   agendaHead: { display: "flex", alignItems: "center", justifyContent: "space-between", fontSize: 12.5 },
   scrim: { position: "fixed", inset: 0, background: "rgba(8,11,14,0.6)", zIndex: 39 },
   hamburger: { display: "flex", alignItems: "center", justifyContent: "center", width: 34, height: 34,
-    background: C.surface, border: `1px solid ${C.line}`, borderRadius: 9, color: C.dim, cursor: "pointer", flexShrink: 0 },
+    background: C.surface, borderWidth: 1, borderStyle: "solid", borderColor: C.line, borderRadius: 9, color: C.dim, cursor: "pointer", flexShrink: 0 },
   calGrid: { display: "grid", gridTemplateColumns: "repeat(7, minmax(0, 1fr))", gap: 6 },
   calDow: { fontSize: 10.5, color: C.dimmer, textAlign: "center", paddingBottom: 4, textTransform: "uppercase", letterSpacing: 0.4 },
-  calCell: { minHeight: 92, minWidth: 0, border: "1px solid", borderRadius: 8, background: C.surface, padding: 6,
+  calCell: { minHeight: 92, minWidth: 0, borderWidth: 1, borderStyle: "solid", borderColor: "currentColor", borderRadius: 8, background: C.surface, padding: 6,
     display: "flex", flexDirection: "column", gap: 3, overflow: "hidden" },
   calNum: { fontSize: 11, fontWeight: 600 },
   calItem: { fontSize: 10, color: C.dim, background: C.raised, borderRadius: 4, padding: "2px 5px",
     cursor: "pointer", overflow: "hidden", whiteSpace: "nowrap", textOverflow: "ellipsis" },
   listCol: { display: "flex", flexDirection: "column", gap: 6 },
-  listRow: { display: "flex", alignItems: "center", gap: 8, background: C.surface, border: `1px solid ${C.line}`,
+  listRow: { display: "flex", alignItems: "center", gap: 8, background: C.surface, borderWidth: 1, borderStyle: "solid", borderColor: C.line,
     borderRadius: 8, padding: "8px 11px", fontSize: 12.5, cursor: "pointer" },
   mapMarker: { position: "absolute", transform: "translate(-50%,-100%)", background: "none", border: "none",
     cursor: "pointer", padding: 0 },
@@ -5285,20 +5170,20 @@ const st = {
     background: C.warn, padding: "1px 5px", borderRadius: 4, whiteSpace: "nowrap", maxWidth: 160,
     overflow: "hidden", textOverflow: "ellipsis" },
   mapTooltip: { position: "absolute", bottom: "100%", marginBottom: 4, background: C.raised,
-    border: `1px solid ${C.line}`, borderRadius: 6, padding: "4px 8px", fontSize: 11, color: C.text,
+    borderWidth: 1, borderStyle: "solid", borderColor: C.line, borderRadius: 6, padding: "4px 8px", fontSize: 11, color: C.text,
     whiteSpace: "nowrap", pointerEvents: "none", zIndex: 5 },
   mapPopup: { position: "absolute", bottom: "100%", marginBottom: 6, background: C.raised,
-    border: `1px solid ${C.line}`, borderRadius: 9, padding: 8, minWidth: 160, maxWidth: 240,
+    borderWidth: 1, borderStyle: "solid", borderColor: C.line, borderRadius: 9, padding: 8, minWidth: 160, maxWidth: 240,
     boxShadow: "0 8px 24px rgba(0,0,0,0.4)", zIndex: 10 },
   mapPopupItem: { display: "flex", alignItems: "center", gap: 5, background: "none", border: "none",
     padding: "4px 5px", borderRadius: 5, fontSize: 12, color: C.text, cursor: "pointer", width: "100%" },
-  tabBar: { display: "flex", gap: 4, background: C.ink, border: `1px solid ${C.line}`, borderRadius: 9, padding: 3 },
+  tabBar: { display: "flex", gap: 4, background: C.ink, borderWidth: 1, borderStyle: "solid", borderColor: C.line, borderRadius: 9, padding: 3 },
   tabBtn: { flex: 1, background: "transparent", border: "none", borderRadius: 7, padding: "7px 6px",
     fontSize: 12, color: C.dim, cursor: "pointer" },
   tabBtnOn: { background: C.raised, color: C.text, fontWeight: 600 },
-  miniSeg: { background: "transparent", border: `1px solid ${C.line}`, borderRadius: 6, padding: "3px 9px",
+  miniSeg: { background: "transparent", borderWidth: 1, borderStyle: "solid", borderColor: C.line, borderRadius: 6, padding: "3px 9px",
     fontSize: 10.5, color: C.dim, cursor: "pointer" },
-  mdBox: { background: C.ink, border: `1px solid ${C.line}`, borderRadius: 8, padding: "9px 11px",
+  mdBox: { background: C.ink, borderWidth: 1, borderStyle: "solid", borderColor: C.line, borderRadius: 8, padding: "9px 11px",
     marginTop: 6, fontSize: 12.5, lineHeight: 1.6, minHeight: 44 },
   mdP: { margin: "0 0 6px", lineHeight: 1.6 },
   mdH: { fontWeight: 700, margin: "8px 0 5px", lineHeight: 1.35 },
@@ -5309,18 +5194,18 @@ const st = {
   mdCode: { background: C.raised, borderRadius: 4, padding: "1px 5px", fontSize: 11.5, fontFamily: "ui-monospace, monospace" },
   mdLink: { color: C.work, textDecoration: "underline", wordBreak: "break-word" },
   mdTodo: { display: "flex", alignItems: "flex-start", gap: 7, margin: "3px 0", lineHeight: 1.55 },
-  mdCheck: { width: 13, height: 13, borderRadius: 3, border: `1px solid ${C.line}`, flexShrink: 0,
+  mdCheck: { width: 13, height: 13, borderRadius: 3, borderWidth: 1, borderStyle: "solid", borderColor: C.line, flexShrink: 0,
     marginTop: 3, display: "flex", alignItems: "center", justifyContent: "center" },
   mdCheckOn: { background: C.personal, borderColor: C.personal },
   moveBox: { borderTop: `1px dashed ${C.line}`, paddingTop: 8 },
   moveHead: { display: "flex", alignItems: "center", gap: 4, fontSize: 10.5, color: C.dimmer, textTransform: "uppercase", letterSpacing: 0.3 },
 
   payCard: { position: "relative", overflow: "hidden", background: "linear-gradient(135deg, rgba(224,179,65,0.16), rgba(224,138,124,0.10))",
-    border: "1px solid rgba(224,179,65,0.32)", borderRadius: 10, padding: "10px 12px 12px", margin: "2px 0 9px" },
+    borderWidth: 1, borderStyle: "solid", borderColor: "rgba(224,179,65,0.32)", borderRadius: 10, padding: "10px 12px 12px", margin: "2px 0 9px" },
   payTop: { display: "flex", alignItems: "center", gap: 6, marginBottom: 4 },
   payLabel: { fontSize: 10, color: C.dim, textTransform: "uppercase", letterSpacing: 0.5 },
   payPaid: { marginInlineStart: "auto", fontSize: 9.5, fontWeight: 700, letterSpacing: 0.6, color: C.personal,
-    border: `1px solid ${C.personal}`, borderRadius: 4, padding: "1px 5px" },
+    borderWidth: 1, borderStyle: "solid", borderColor: C.personal, borderRadius: 4, padding: "1px 5px" },
   payAmount: { fontSize: 22, fontWeight: 700, letterSpacing: -0.5, lineHeight: 1.15, fontVariantNumeric: "tabular-nums" },
   payCur: { fontSize: 11, fontWeight: 500, color: C.dim, marginInlineStart: 5 },
   payDue: { display: "flex", alignItems: "center", gap: 4, fontSize: 10.5, color: C.dim, marginTop: 5 },
@@ -5328,16 +5213,16 @@ const st = {
     background: "rgba(224,179,65,0.10)" },
 
   linkStack: { display: "flex", flexDirection: "column", marginTop: 9, position: "relative" },
-  linkRow: { display: "flex", alignItems: "center", gap: 8, background: C.ink, border: `1px solid ${C.line}`,
+  linkRow: { display: "flex", alignItems: "center", gap: 8, background: C.ink, borderWidth: 1, borderStyle: "solid", borderColor: C.line,
     borderTop: "none", padding: "7px 9px", textDecoration: "none", color: "inherit", overflow: "hidden" },
   favicon: { borderRadius: 3, flexShrink: 0, background: C.raised },
   linkText: { display: "flex", flexDirection: "column", minWidth: 0, lineHeight: 1.3 },
   linkTitle: { fontSize: 11.5, color: C.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
   linkHost: { fontSize: 10, color: C.dimmer, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
   moreLinksBtn: { display: "block", width: "100%", textAlign: "center", background: C.ink,
-    border: `1px solid ${C.line}`, borderTop: "none", borderBottomLeftRadius: 9, borderBottomRightRadius: 9,
+    borderWidth: 1, borderStyle: "solid", borderColor: C.line, borderTop: "none", borderBottomLeftRadius: 9, borderBottomRightRadius: 9,
     padding: "6px 8px", fontSize: 11, color: C.dim, cursor: "pointer" },
-  richLinkRow: { display: "flex", alignItems: "stretch", gap: 0, background: C.ink, border: `1px solid ${C.line}`,
+  richLinkRow: { display: "flex", alignItems: "stretch", gap: 0, background: C.ink, borderWidth: 1, borderStyle: "solid", borderColor: C.line,
     borderTop: "none", textDecoration: "none", color: "inherit", overflow: "hidden", minHeight: 84 },
   richLinkImg: { width: "38%", maxWidth: 140, objectFit: "cover", flexShrink: 0, background: C.raised },
   richLinkBody: { display: "flex", flexDirection: "column", gap: 3, minWidth: 0, padding: "9px 11px", justifyContent: "center" },
@@ -5351,7 +5236,7 @@ const st = {
   metaLine: { display: "flex", flexWrap: "wrap", alignItems: "center", gap: 6, marginTop: 10, position: "relative" },
   metaType: { display: "inline-flex", alignItems: "center", gap: 4, fontSize: 10.5, color: C.dimmer,
     paddingInlineEnd: 6, marginInlineEnd: 1, borderInlineEnd: `1px solid ${C.line}` },
-  metaPill: { display: "inline-flex", alignItems: "center", gap: 3, fontSize: 10, border: "1px solid",
+  metaPill: { display: "inline-flex", alignItems: "center", gap: 3, fontSize: 10, borderWidth: 1, borderStyle: "solid", borderColor: "currentColor",
     borderRadius: 20, padding: "1px 7px" },
   faviconWrap: { position: "relative", width: 16, height: 16, flexShrink: 0, display: "inline-flex",
     alignItems: "center", justifyContent: "center" },
@@ -5360,16 +5245,16 @@ const st = {
   mapOffline: { position: "absolute", inset: 0, display: "flex", flexDirection: "column", alignItems: "center",
     justifyContent: "center", gap: 8, padding: 20, textAlign: "center", fontSize: 12, color: C.dimmer,
     background: `repeating-linear-gradient(45deg, ${C.raised}, ${C.raised} 10px, ${C.surface} 10px, ${C.surface} 20px)` },
-  cloudState: { display: "flex", alignItems: "center", gap: 9, background: C.raised, border: `1px solid ${C.line}`,
+  cloudState: { display: "flex", alignItems: "center", gap: 9, background: C.raised, borderWidth: 1, borderStyle: "solid", borderColor: C.line,
     borderRadius: 9, padding: "10px 12px", fontSize: 12.5 },
-  cloudMsg: { border: "1px solid", borderRadius: 8, padding: "8px 11px", fontSize: 12, lineHeight: 1.5 },
+  cloudMsg: { borderWidth: 1, borderStyle: "solid", borderColor: "currentColor", borderRadius: 8, padding: "8px 11px", fontSize: 12, lineHeight: 1.5 },
   labelRow: { display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center" },
-  labelAdd: { display: "flex", alignItems: "center", gap: 5, background: "none", border: `1px dashed ${C.line}`,
+  labelAdd: { display: "flex", alignItems: "center", gap: 5, background: "none", borderWidth: 1, borderStyle: "dashed", borderColor: C.line,
     borderRadius: 20, padding: "4px 11px", fontSize: 11.5, color: C.dimmer, cursor: "pointer" },
   pillX: { background: "none", border: "none", cursor: "pointer", padding: 0, marginLeft: 3, opacity: 0.7, display: "flex" },
   pop: { position: "absolute", bottom: "calc(100% + 7px)", left: 0, width: 215, background: C.raised,
-    border: `1px solid ${C.line}`, borderRadius: 10, padding: 7, zIndex: 5, boxShadow: "0 14px 36px rgba(0,0,0,0.45)" },
-  popIn: { width: "100%", background: C.ink, border: `1px solid ${C.line}`, borderRadius: 7, padding: "6px 9px", fontSize: 12, marginBottom: 5 },
+    borderWidth: 1, borderStyle: "solid", borderColor: C.line, borderRadius: 10, padding: 7, zIndex: 5, boxShadow: "0 14px 36px rgba(0,0,0,0.45)" },
+  popIn: { width: "100%", background: C.ink, borderWidth: 1, borderStyle: "solid", borderColor: C.line, borderRadius: 7, padding: "6px 9px", fontSize: 12, marginBottom: 5 },
   popRow: { display: "flex", alignItems: "center", gap: 8, padding: "6px 8px", borderRadius: 6, fontSize: 12, cursor: "pointer" },
 
   foot: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8,
@@ -5377,42 +5262,42 @@ const st = {
   primaryBtn: { display: "flex", alignItems: "center", gap: 6, background: C.personal, color: C.ink, border: "none",
     borderRadius: 8, padding: "8px 15px", fontSize: 12.5, fontWeight: 600, cursor: "pointer" },
   secBtn: { display: "flex", alignItems: "center", gap: 6, background: C.raised, color: C.dim,
-    border: `1px solid ${C.line}`, borderRadius: 8, padding: "8px 14px", fontSize: 12.5, cursor: "pointer" },
-  closeBtn: { background: C.raised, border: `1px solid ${C.line}`, borderRadius: 8, padding: "8px 18px",
+    borderWidth: 1, borderStyle: "solid", borderColor: C.line, borderRadius: 8, padding: "8px 14px", fontSize: 12.5, cursor: "pointer" },
+  closeBtn: { background: C.raised, borderWidth: 1, borderStyle: "solid", borderColor: C.line, borderRadius: 8, padding: "8px 18px",
     fontSize: 12.5, fontWeight: 500, cursor: "pointer" },
   okBtn: { display: "flex", alignItems: "center", gap: 5, background: "rgba(99,201,168,0.14)", color: C.personal,
-    border: "1px solid rgba(99,201,168,0.3)", borderRadius: 7, padding: "6px 12px", fontSize: 12, cursor: "pointer" },
+    borderWidth: 1, borderStyle: "solid", borderColor: "rgba(99,201,168,0.3)", borderRadius: 7, padding: "6px 12px", fontSize: 12, cursor: "pointer" },
   noBtn: { display: "flex", alignItems: "center", gap: 5, background: "transparent", color: C.dim,
-    border: `1px solid ${C.line}`, borderRadius: 7, padding: "6px 12px", fontSize: 12, cursor: "pointer" },
+    borderWidth: 1, borderStyle: "solid", borderColor: C.line, borderRadius: 7, padding: "6px 12px", fontSize: 12, cursor: "pointer" },
   ghost: { background: "none", border: "none", cursor: "pointer", color: C.dimmer, padding: 2, display: "flex", flexShrink: 0 },
 
 
   hint: { fontSize: 12, color: C.dimmer, margin: 0, lineHeight: 1.5 },
   subHead: { fontSize: 13.5, fontWeight: 600, margin: "6px 0 0" },
-  stat: { flex: 1, background: C.raised, border: `1px solid ${C.line}`, borderRadius: 9, padding: "9px 11px",
+  stat: { flex: 1, background: C.raised, borderWidth: 1, borderStyle: "solid", borderColor: C.line, borderRadius: 9, padding: "9px 11px",
     display: "flex", flexDirection: "column", gap: 1 },
   statN: { fontSize: 19, fontWeight: 700 },
-  lesson: { display: "flex", alignItems: "center", gap: 8, background: C.raised, border: `1px solid ${C.line}`,
+  lesson: { display: "flex", alignItems: "center", gap: 8, background: C.raised, borderWidth: 1, borderStyle: "solid", borderColor: C.line,
     borderRadius: 9, padding: "9px 11px", fontSize: 12.5 },
   wrong: { background: "rgba(224,138,124,0.12)", color: C.danger, borderRadius: 5, padding: "2px 7px" },
   right: { background: "rgba(99,201,168,0.12)", color: C.personal, borderRadius: 5, padding: "2px 7px" },
 
   wrapRow: { display: "flex", flexWrap: "wrap", gap: 7 },
-  itemChip: { display: "inline-flex", alignItems: "center", gap: 6, background: C.raised, border: `1px solid ${C.line}`,
+  itemChip: { display: "inline-flex", alignItems: "center", gap: 6, background: C.raised, borderWidth: 1, borderStyle: "solid", borderColor: C.line,
     borderRadius: 20, padding: "5px 8px 5px 11px", fontSize: 12 },
   dragHandle: { cursor: "grab", color: C.dimmer, fontSize: 11, lineHeight: 1, userSelect: "none" },
-  renameIn: { border: `1px solid ${C.line}`, background: C.surface, color: C.text, borderRadius: 5,
+  renameIn: { borderWidth: 1, borderStyle: "solid", borderColor: C.line, background: C.surface, color: C.text, borderRadius: 5,
     fontSize: 12, padding: "1px 5px", width: 90 },
-  pickerPanel: { background: C.raised, border: `1px solid ${C.line}`, borderRadius: 10, padding: 10,
+  pickerPanel: { background: C.raised, borderWidth: 1, borderStyle: "solid", borderColor: C.line, borderRadius: 10, padding: 10,
     display: "flex", flexDirection: "column", gap: 8, marginTop: 8 },
   pickerScroll: { maxHeight: 210, overflowY: "auto", display: "flex", flexDirection: "column", gap: 8, paddingRight: 4 },
   pickerGroup: { fontSize: 10.5, color: C.dimmer, marginBottom: 4 },
   chipIconBtn: { display: "flex", alignItems: "center", justifyContent: "center", width: 24, height: 24,
-    background: C.ink, border: `1px solid ${C.line}`, borderRadius: 6, cursor: "pointer", padding: 0 },
+    background: C.ink, borderWidth: 1, borderStyle: "solid", borderColor: C.line, borderRadius: 6, cursor: "pointer", padding: 0 },
   iconGrid: { display: "grid", gridTemplateColumns: "repeat(10, 1fr)", gap: 5 },
   iconBtn: { display: "flex", alignItems: "center", justifyContent: "center", height: 28, background: C.raised,
-    border: `1px solid ${C.line}`, borderRadius: 7, cursor: "pointer", color: C.dim },
+    borderWidth: 1, borderStyle: "solid", borderColor: C.line, borderRadius: 7, cursor: "pointer", color: C.dim },
   iconBtnOn: { background: "rgba(99,201,168,0.15)", borderColor: C.personal, color: C.personal },
   emojiGrid: { display: "grid", gridTemplateColumns: "repeat(12, 1fr)", gap: 4, margin: "8px 0" },
-  emojiBtn: { height: 26, background: C.raised, border: `1px solid ${C.line}`, borderRadius: 6, cursor: "pointer", fontSize: 13 },
+  emojiBtn: { height: 26, background: C.raised, borderWidth: 1, borderStyle: "solid", borderColor: C.line, borderRadius: 6, cursor: "pointer", fontSize: 13 },
 };
