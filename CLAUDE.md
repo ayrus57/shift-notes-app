@@ -59,11 +59,35 @@ createRoot(document.getElementById("root")).render(<ShiftApp />);
    `re.compile(r'(<script type="module">).*?(</script>)', re.DOTALL)` and
    `pattern.subn(...)` does this cleanly.
 4. Sanity check: `grep -c "createRoot" index.html` should print exactly `1`.
-5. `git add index.html source/sift-notes-app.jsx` (plus any other changed
-   asset), commit with a plain-language message, `git push origin main`.
-6. Netlify auto-deploys from the push — no further action needed. Tell Arash
-   in plain language what shipped; he doesn't need to know about the build
-   step, just that it's live.
+5. **Draft first, then confirm (Arash's standing preference).**
+   `git add index.html source/sift-notes-app.jsx` (plus any other changed
+   asset), commit with a plain-language message, and push to the session's
+   working branch — **not** `main`. Show him a preview of the change (see
+   "Previewing the app" below), then ask whether to put it live. Only after
+   he says yes, bring the change into `main` and push `main`.
+6. Netlify auto-deploys from the push to `main` — no further action needed.
+   Tell Arash in plain language what shipped; he doesn't need to know about
+   the build step, just that it's live.
+
+### Previewing the app
+
+Arash wants a **live, clickable preview in the chat's side panel** (a
+published Artifact), not screenshots. His preview artifact is
+https://claude.ai/artifact/Sy3vFFDXMayC76wqgw5QH1 — republish to that same
+URL after each draft change (pass it as `url` from a new session) and open it.
+
+How to build it: `esm.sh` (where `index.html`'s importmap loads React and
+lucide-react) is blocked both in cloud sessions and inside artifacts, so the
+preview must be fully self-contained. In the scratchpad, `npm i react@18.3.1
+react-dom@18.3.1 lucide-react@0.383.0`, copy `source/` in, and bundle
+`entry.jsx` with esbuild **without** the `--external` flags (add
+`--minify --define:process.env.NODE_ENV='"production"'`). Then write an HTML
+page with a `<title>Shift</title>`, the same `<style>` and boot/error script
+as `index.html`, a `#root` div, and the bundle inlined in a
+`<script type="module">`. Leave out `window.__SHIFT_CLOUD` so the preview
+never touches his real Supabase data. The preview starts empty (no real
+notes); anything typed there stays only in that browser. This preview file
+is throwaway: never commit it.
 
 Never hand him raw files to upload manually again unless he explicitly asks
 for that — the whole point of this repo is to avoid that.
@@ -144,14 +168,8 @@ for that — the whole point of this repo is to avoid that.
 
 ## Open items / things to follow up on
 
-- Arash was in the middle of connecting this repo to Netlify via "New site
-  from Git" when this session ended. Two things worth checking with him:
-  1. Whether that created a **second, new** Netlify site (new URL) instead
-     of relinking his **existing** site to this repo — if he wants to keep
-     his old URL, the fix is Site settings → Build & deploy → Link
-     repository on the *existing* site, not a fresh "Add new site" flow.
-  2. Whether the first deploy actually shows the current Shift app (not a
-     blank page or an old cached version) — worth a live check.
+- ~~Netlify hookup checks~~ — **done.** Arash confirmed Netlify deploys
+  correctly from GitHub and the live site shows the current Shift app.
 - He explicitly wants to **learn GitHub** as part of this, so keep
   explanations of what a commit/push/deploy did in plain terms rather than
   skipping straight to "done."
