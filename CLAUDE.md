@@ -179,6 +179,13 @@ for that — the whole point of this repo is to avoid that.
   removed on any pointerdown) brings a green ring back for keyboard users
   only. Text inputs keep their normal focus ring. Don't add per-button
   outline styles; the global rule covers new buttons automatically.
+- **Borders in `st` are longhands, never the `border` shorthand** (except
+  `border: "none"`): `borderWidth` / `borderStyle` / `borderColor`. Many
+  "selected" styles (`viewBtnOn`, `mdBtnOn`, `numChipOn`, `segOn`...) only
+  override `borderColor`; if the base used `border: \`1px solid ...\``,
+  React *removes* `border-color` when the button is deselected and the
+  border turns white. That was the "white stroke after clicking" bug. Keep
+  new styles in longhand form too.
 - **Undo buttons**: the description field uses `undoHist` /
   `undoField("content")`: an effect watches `editor.content` and pushes the
   previous value, grouping edits less than
@@ -187,8 +194,9 @@ for that — the whole point of this repo is to avoid that.
 
 ## Recent work log (most recent first)
 
-- Removed the focus outline ("stroke") that appeared on buttons after
-  clicking, app-wide.
+- Fixed the white "stroke" left on buttons after clicking, app-wide (real
+  cause: `border` shorthand + toggled `borderColor`, see above; click focus
+  rings were removed too).
 - Extra description is now a TipTap rich-text editor that stores Markdown
   (replaced the buggy per-line block editor), and both description fields
   got Undo buttons.
