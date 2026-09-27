@@ -9,6 +9,11 @@ import {
   Siren, ArrowUp, ArrowDown, Rows, Columns, Paperclip, Upload,
   Heading1, Heading2, Bold, Italic, List, Quote, Code, Link as LinkIcon, Eye, EyeOff, Info, Copy, Undo2,
 } from "lucide-react";
+import { Editor as TiptapEditor, Extension } from "@tiptap/core";
+import StarterKit from "@tiptap/starter-kit";
+import { Markdown as TiptapMarkdown } from "@tiptap/markdown";
+import { TaskList, TaskItem } from "@tiptap/extension-list";
+import { Placeholder } from "@tiptap/extensions";
 
 /* ---------------- tokens ---------------- */
 
@@ -642,6 +647,8 @@ function mdInline(text, key) {
   const out = [];
   let rest = text, i = 0;
   const patterns = [
+    // a backslash-escaped character (the rich editor writes e.g. "\[" for a literal "[") shows as itself
+    { re: /\\([\\`*_{}\[\]()#+\-.!>|~])/, render: (m) => m[1] },
     { re: /`([^`]+)`/, render: (m, k) => <code key={k} style={st.mdCode}>{m[1]}</code> },
     { re: /\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/, render: (m, k) => <a key={k} href={m[2]} target="_blank" rel="noreferrer" style={st.mdLink}>{m[1]}</a> },
     { re: /\*\*([^*]+)\*\*/, render: (m, k) => <strong key={k}>{m[1]}</strong> },
@@ -662,6 +669,94 @@ function mdInline(text, key) {
     rest = rest.slice(best.m.index + best.m[0].length);
   }
   return out;
+}
+
+/* ---------------- extra-description rich text editor ---------------- */
+
+// Each text block picks its own direction from its first letter, so Persian lines run RTL.
+const AutoDir = Extension.create({
+  name: "autoDir",
+  addGlobalAttributes() {
+    return [{
+      types: ["paragraph", "heading", "blockquote", "listItem", "taskItem"],
+      attributes: { dir: { default: "auto", rendered: true, renderHTML: () => ({ dir: "auto" }), parseHTML: () => "auto" } },
+    }];
+  },
+});
+
+const MD_EDITOR_CSS = `
+.shift-md-editor .ProseMirror { outline: none; min-height: 200px; font-size: 13px; line-height: 1.6; color: ${C.text}; word-break: break-word; }
+.shift-md-editor .ProseMirror > * + * { margin-top: 4px; }
+.shift-md-editor p { margin: 0; }
+.shift-md-editor h1, .shift-md-editor h2, .shift-md-editor h3 { font-weight: 700; line-height: 1.3; margin: 10px 0 4px; }
+.shift-md-editor h1 { font-size: 20px; }
+.shift-md-editor h2 { font-size: 16.5px; }
+.shift-md-editor h3 { font-size: 14px; }
+.shift-md-editor .ProseMirror > :first-child { margin-top: 0; }
+.shift-md-editor ul, .shift-md-editor ol { margin: 2px 0; padding-inline-start: 22px; }
+.shift-md-editor li { margin: 2px 0; }
+.shift-md-editor li > p { margin: 0; }
+.shift-md-editor ol > li::marker { color: ${C.dim}; }
+.shift-md-editor ul[data-type="taskList"] { list-style: none; padding-inline-start: 2px; }
+.shift-md-editor ul[data-type="taskList"] li { display: flex; align-items: flex-start; gap: 7px; }
+.shift-md-editor ul[data-type="taskList"] li > label { flex-shrink: 0; margin-top: 3px; user-select: none; }
+.shift-md-editor ul[data-type="taskList"] li > label input { accent-color: ${C.personal}; margin: 0; cursor: pointer; }
+.shift-md-editor ul[data-type="taskList"] li > div { flex: 1; min-width: 0; }
+.shift-md-editor ul[data-type="taskList"] li[data-checked="true"] > div { text-decoration: line-through; opacity: .6; }
+.shift-md-editor blockquote { margin: 4px 0; padding-inline-start: 10px; border-inline-start: 2px solid ${C.line}; color: ${C.dim}; }
+.shift-md-editor hr { border: none; border-top: 1px solid ${C.line}; margin: 10px 0; }
+.shift-md-editor hr.ProseMirror-selectednode { border-top-color: ${C.work}; }
+.shift-md-editor code { background: ${C.raised}; border-radius: 4px; padding: 1px 5px; font-size: 12px; font-family: ui-monospace, monospace; }
+.shift-md-editor pre { background: ${C.raised}; border-radius: 6px; padding: 8px 10px; overflow-x: auto; }
+.shift-md-editor pre code { background: none; padding: 0; }
+.shift-md-editor a { color: ${C.work}; text-decoration: underline; }
+.shift-md-editor p.is-editor-empty:first-child::before { content: attr(data-placeholder); color: ${C.dimmer}; float: left; height: 0; pointer-events: none; }
+`;
+
+// Rich text editor (TipTap) for the extra description. Headings, lists, checklists etc. show
+// formatted while typing, but the value going in and out is plain Markdown, so everything
+// else (the note card preview, sync, the Claude connector) keeps working with Markdown.
+// onEditor(editor) fires on every change so the toolbar can show active/undo states.
+function MarkdownEditor({ value, onChange, onEditor, placeholder }) {
+  const hostRef = useRef(null);
+  const edRef = useRef(null);
+  const lastMd = useRef(value || "");
+  const cb = useRef({});
+  cb.current = { onChange, onEditor };
+  useEffect(() => {
+    const ed = new TiptapEditor({
+      element: hostRef.current,
+      extensions: [
+        StarterKit.configure({ heading: { levels: [1, 2, 3] }, link: { openOnClick: false, autolink: true } }),
+        TaskList, TaskItem.configure({ nested: true }),
+        TiptapMarkdown, Placeholder.configure({ placeholder: placeholder || "" }), AutoDir,
+      ],
+      content: value || "",
+      contentType: "markdown",
+      onUpdate: ({ editor }) => {
+        const md = editor.getMarkdown();
+        lastMd.current = md;
+        cb.current.onChange && cb.current.onChange(md);
+      },
+      onTransaction: ({ editor }) => { cb.current.onEditor && cb.current.onEditor(editor); },
+    });
+    edRef.current = ed;
+    cb.current.onEditor && cb.current.onEditor(ed);
+    return () => { cb.current.onEditor && cb.current.onEditor(null); ed.destroy(); edRef.current = null; };
+  }, []);
+  // the value was changed from outside (e.g. a sync arrived) - load it without an "update"
+  useEffect(() => {
+    const ed = edRef.current;
+    if (!ed || (value || "") === lastMd.current) return;
+    lastMd.current = value || "";
+    ed.commands.setContent(value || "", { contentType: "markdown", emitUpdate: false });
+  }, [value]);
+  return (
+    <>
+      <style>{MD_EDITOR_CSS}</style>
+      <div ref={hostRef} className="shift-md-editor" />
+    </>
+  );
 }
 
 function Markdown({ text }) {
@@ -1531,21 +1626,20 @@ export default function ShiftApp() {
   const upd = (f) => setEditor((p) => (p ? { ...p, ...f } : p));
   const [activeMore, setActiveMore] = useState(null); // which popover (reminder/label/people/places/dates/images/attachments) is open, if any
   const [moreExpanded, setMoreExpanded] = useState(false);
-  // Undo for the description and extra-description fields. Each stack holds the field's
-  // earlier values; edits that land within UNDO_GROUP_MS of the previous one join the same
-  // step, so one Undo takes back a word or phrase rather than a single letter. Changes are
-  // picked up by watching the field values (not the inputs), so toolbar buttons, line
-  // merges and cross-line deletes in the extra editor are all undoable too.
+  // Undo for the description field (the extra description's rich editor has its own undo
+  // history). The stack holds earlier values; edits that land within UNDO_GROUP_MS of the
+  // previous one join the same step, so one Undo takes back a word or phrase rather than a
+  // single letter.
   const UNDO_GROUP_MS = 800;
-  const [undoHist, setUndoHist] = useState({ content: [], extra: [] });
+  const [undoHist, setUndoHist] = useState({ content: [] });
   const undoSeenRef = useRef(null); // last values seen; null = take a fresh baseline
   const [undoEpoch, setUndoEpoch] = useState(0); // bumped when a note is opened, to re-baseline
   useEffect(() => {
     if (!editor) return;
-    const cur = { content: editor.content || "", extra: editor.extra || "" };
+    const cur = { content: editor.content || "" };
     const seen = undoSeenRef.current;
     if (!seen) { undoSeenRef.current = { ...cur, at: {}, skip: {} }; return; }
-    ["content", "extra"].forEach((f) => {
+    ["content"].forEach((f) => {
       if (cur[f] === seen[f]) return;
       const before = seen[f];
       seen[f] = cur[f];
@@ -1555,7 +1649,7 @@ export default function ShiftApp() {
       seen.at[f] = now;
       setUndoHist((h) => (joins && h[f].length ? h : { ...h, [f]: [...h[f].slice(-99), before] }));
     });
-  }, [editor && editor.content, editor && editor.extra, undoEpoch]);
+  }, [editor && editor.content, undoEpoch]);
   const undoField = (f) => {
     const stack = undoHist[f];
     if (!stack.length) return;
@@ -1568,7 +1662,7 @@ export default function ShiftApp() {
     setExtraOpen(false); setContactQuery(""); setTab("filing"); setRelationsOpen(false);
     setActiveMore(null);
     setMoreExpanded(false);
-    setUndoHist({ content: [], extra: [] }); undoSeenRef.current = null; setUndoEpoch((x) => x + 1);
+    setUndoHist({ content: [] }); undoSeenRef.current = null; setUndoEpoch((x) => x + 1);
   };
   const openNew = () => {
     setEditor({ id: null, title: "", content: "", extra: "", labels: [], contacts: [], assignees: [],
@@ -2157,87 +2251,24 @@ export default function ShiftApp() {
     );
     return null;
   };
-  const [extraEditing, setExtraEditing] = useState(false);
-  // Extra description: a plain Markdown textarea while editing, rendered Markdown otherwise.
-  // The toolbar buttons just insert standard Markdown syntax at the cursor / selection.
-  const extraRef = useRef(null);
-  const extraSelAfterRef = useRef(null); // [start, end] to restore after the next render
-  useEffect(() => {
-    const sel = extraSelAfterRef.current, el = extraRef.current;
-    if (!sel || !el) return;
-    extraSelAfterRef.current = null;
-    el.focus();
-    try { el.setSelectionRange(sel[0], sel[1]); } catch {}
-  }, [editor && editor.extra]);
-  useEffect(() => {
-    const el = extraRef.current;
-    if (!extraEditing || !el) return;
-    el.focus();
-    const p = el.value.length;
-    try { el.setSelectionRange(p, p); } catch {}
-  }, [extraEditing]);
-  // runs fn(text, selStart, selEnd) -> { text, sel } against the textarea's current selection
-  const extraEdit = (fn) => {
-    const el = extraRef.current;
-    const text = editor.extra || "";
-    const s = el ? el.selectionStart : text.length, e = el ? el.selectionEnd : text.length;
-    const r = fn(text, s, e);
-    extraSelAfterRef.current = r.sel;
-    upd({ extra: r.text });
-  };
-  const EXTRA_LINE_MARKER = /^(#{1,6}\s+|-\s\[[ xX]\]\s+|[-*]\s+|>\s+|\d+\.\s+)/;
-  // Puts a line marker ("# ", "- ", "> "...) on every line the selection touches, or takes it
-  // off again if all of them already have it. numbered = "1. ", "2. "... instead of one prefix.
-  const extraLinePrefix = (prefix, numbered = false) => extraEdit((text, s, e) => {
-    const ls = text.lastIndexOf("\n", s - 1) + 1;
-    let le = text.indexOf("\n", e);
-    if (le < 0) le = text.length;
-    const lines = text.slice(ls, le).split("\n");
-    const has = (l) => (numbered ? /^\d+\.\s/.test(l)
-      : prefix === "- " ? l.startsWith("- ") && !/^-\s\[[ xX]\]/.test(l) : l.startsWith(prefix));
-    const allHave = lines.every(has);
-    const out = lines.map((l, k) => {
-      const bare = l.replace(EXTRA_LINE_MARKER, "");
-      return allHave ? bare : (numbered ? `${k + 1}. ` : prefix) + bare;
-    }).join("\n");
-    const end = ls + out.length;
-    return { text: text.slice(0, ls) + out + text.slice(le), sel: [end, end] };
-  });
-  const extraNumberedList = () => extraLinePrefix("", true);
-  const extraWrapSelection = (before, after = before) => extraEdit((text, s, e) => ({
-    text: text.slice(0, s) + before + text.slice(s, e) + after + text.slice(e),
-    sel: [s + before.length, e + before.length],
-  }));
-  const extraInsertLink = () => extraEdit((text, s, e) => {
-    const label = text.slice(s, e) || "text";
-    const from = s + label.length + 3; // selects the "url" placeholder
-    return { text: text.slice(0, s) + `[${label}](url)` + text.slice(e), sel: [from, from + 3] };
-  });
-  const extraInsertDivider = () => extraEdit((text, s, e) => {
-    const before = s === 0 ? "" : text[s - 1] === "\n" ? "\n" : "\n\n";
-    const ins = before + "---\n\n";
-    return { text: text.slice(0, s) + ins + text.slice(e), sel: [s + ins.length, s + ins.length] };
-  });
-  // Enter on a list line starts the next item ("- ", "- [ ] ", "2. ", "> "); Enter on an
-  // item that's still empty ends the list instead. Everything else is the normal textarea.
-  const extraKeyDown = (ev) => {
-    if (ev.key !== "Enter" || ev.shiftKey || ev.nativeEvent.isComposing) return;
-    const el = ev.currentTarget, text = el.value, s = el.selectionStart;
-    if (s !== el.selectionEnd) return;
-    const ls = text.lastIndexOf("\n", s - 1) + 1;
-    const line = text.slice(ls, s);
-    const m = line.match(/^(\s*)(?:(\d+)\.\s|(-\s\[[ xX]\]\s|[-*]\s|>\s))/);
-    if (!m) return;
-    ev.preventDefault();
-    if (line === m[0]) { // empty item: drop the marker and stop the list
-      extraSelAfterRef.current = [ls, ls];
-      upd({ extra: text.slice(0, ls) + text.slice(s) });
-      return;
-    }
-    const next = m[1] + (m[2] ? `${parseInt(m[2], 10) + 1}. ` : /^-\s\[/.test(m[3]) ? "- [ ] " : m[3]);
-    const ins = "\n" + next;
-    extraSelAfterRef.current = [s + ins.length, s + ins.length];
-    upd({ extra: text.slice(0, s) + ins + text.slice(s) });
+  // The extra-description editor (TipTap) instance, handed up by <MarkdownEditor> so the
+  // toolbar can run its commands. extraTick re-renders on each change for active states.
+  const extraEdRef = useRef(null);
+  const [, setExtraTick] = useState(0);
+  const onExtraEditor = useCallback((ed) => { extraEdRef.current = ed; setExtraTick((t) => t + 1); }, []);
+  const extraCmd = (fn) => { const ed = extraEdRef.current; if (ed) fn(ed.chain().focus()).run(); };
+  const extraActive = (name, attrs) => { const ed = extraEdRef.current; return !!(ed && ed.isActive(name, attrs)); };
+  const [extraLinkDraft, setExtraLinkDraft] = useState(null); // null = link box closed
+  const applyExtraLink = () => {
+    const ed = extraEdRef.current;
+    const url = (extraLinkDraft || "").trim();
+    setExtraLinkDraft(null);
+    if (!ed) return;
+    if (!url) { ed.chain().focus().extendMarkRange("link").unsetLink().run(); return; }
+    const href = /^[a-z][a-z0-9+.-]*:/i.test(url) ? url : "https://" + url;
+    if (ed.state.selection.empty && !ed.isActive("link"))
+      ed.chain().focus().insertContent({ type: "text", text: url, marks: [{ type: "link", attrs: { href } }] }).run();
+    else ed.chain().focus().extendMarkRange("link").setLink({ href }).run();
   };
   const [newChecklistItem, setNewChecklistItem] = useState("");
   const addChecklistItem = () => {
@@ -3955,7 +3986,7 @@ export default function ShiftApp() {
                 <div>
                   {!extraOpen && (
                     <button style={editor.extra && editor.extra.trim() ? st.extraBoxFilled : st.extraBoxEmpty}
-                      onClick={() => { setExtraOpen(true); if (!(editor.extra && editor.extra.trim())) setExtraEditing(true); }}>
+                      onClick={() => setExtraOpen(true)}>
                       {editor.extra && editor.extra.trim() ? (
                         <span style={{ ...rtl(editor.extra), color: C.text }}>{editor.extra.trim().slice(0, 80)}{editor.extra.trim().length > 80 ? "…" : ""}</span>
                       ) : (
@@ -3964,46 +3995,68 @@ export default function ShiftApp() {
                     </button>
                   )}
                   {extraOpen && (
-                    <button style={st.collapseBtn} onClick={() => { setExtraOpen(false); setExtraEditing(false); }}>
+                    <button style={st.collapseBtn} onClick={() => { setExtraOpen(false); setExtraLinkDraft(null); }}>
                       <ChevronDown size={11} /> Extra description
                     </button>
                   )}
                   {extraOpen && (
-                    extraEditing || !(editor.extra && editor.extra.trim()) ? (
-                      <>
-                        <div style={{ display: "flex", gap: 3, flexWrap: "wrap", marginTop: 6 }}>
-                          <button style={st.mdBtn} title="Heading" onMouseDown={(e) => e.preventDefault()} onClick={() => extraLinePrefix("# ")}><Heading1 size={13} /></button>
-                          <button style={st.mdBtn} title="Subheading" onMouseDown={(e) => e.preventDefault()} onClick={() => extraLinePrefix("## ")}><Heading2 size={13} /></button>
-                          <button style={st.mdBtn} title="Bold" onMouseDown={(e) => e.preventDefault()} onClick={() => extraWrapSelection("**")}><Bold size={13} /></button>
-                          <button style={st.mdBtn} title="Italic" onMouseDown={(e) => e.preventDefault()} onClick={() => extraWrapSelection("*")}><Italic size={13} /></button>
-                          <button style={st.mdBtn} title="Bullet list" onMouseDown={(e) => e.preventDefault()} onClick={() => extraLinePrefix("- ")}><List size={13} /></button>
-                          <button style={st.mdBtn} title="Numbered list" onMouseDown={(e) => e.preventDefault()} onClick={() => extraNumberedList()}><span style={{ fontSize: 12, fontWeight: 700, width: 13, textAlign: "center" }}>1.</span></button>
-                          <button style={st.mdBtn} title="Checklist" onMouseDown={(e) => e.preventDefault()} onClick={() => extraLinePrefix("- [ ] ")}><CheckSquare size={13} /></button>
-                          <button style={st.mdBtn} title="Quote" onMouseDown={(e) => e.preventDefault()} onClick={() => extraLinePrefix("> ")}><Quote size={13} /></button>
-                          <button style={st.mdBtn} title="Code" onMouseDown={(e) => e.preventDefault()} onClick={() => extraWrapSelection("`")}><Code size={13} /></button>
-                          <button style={st.mdBtn} title="Link" onMouseDown={(e) => e.preventDefault()} onClick={extraInsertLink}><LinkIcon size={13} /></button>
-                          <button style={st.mdBtn} title="Divider" onMouseDown={(e) => e.preventDefault()} onClick={extraInsertDivider}><Minus size={13} /></button>
-                          <button style={{ ...st.undoBtn, marginLeft: "auto", ...(undoHist.extra.length ? {} : st.undoBtnOff) }}
-                            title="Undo" disabled={!undoHist.extra.length}
-                            onMouseDown={(e) => e.preventDefault()} onClick={() => undoField("extra")}>
-                            <Undo2 size={12} /> Undo
-                          </button>
-                        </div>
-                        <textarea ref={extraRef} value={editor.extra || ""}
-                          placeholder="Write more detail… (Markdown: # heading, - list, 1. numbered, **bold**)"
-                          rows={Math.max(10, (editor.extra || "").split("\n").length + 1)}
-                          style={{ ...st.teachIn, ...rtl(editor.extra), marginTop: 6, width: "100%", boxSizing: "border-box",
-                            minHeight: 220, resize: "vertical", color: C.text, fontFamily: "inherit", fontSize: 13, lineHeight: 1.6, outline: "none" }}
-                          onChange={(e) => upd({ extra: e.target.value })}
-                          onKeyDown={extraKeyDown}
-                          onBlur={() => setExtraEditing(false)} />
-                      </>
-                    ) : (
-                      <div style={{ ...st.mdBox, ...rtl(editor.extra), marginTop: 6, cursor: "text", minHeight: 220 }}
-                        onClick={(e) => { if (!e.target.closest("a")) setExtraEditing(true); }}>
-                        <Markdown text={editor.extra} />
+                    <>
+                      <div style={{ display: "flex", gap: 3, flexWrap: "wrap", marginTop: 6 }}>
+                        {[
+                          ["Heading", <Heading1 size={13} />, (c) => c.toggleHeading({ level: 1 }), ["heading", { level: 1 }]],
+                          ["Subheading", <Heading2 size={13} />, (c) => c.toggleHeading({ level: 2 }), ["heading", { level: 2 }]],
+                          ["Bold", <Bold size={13} />, (c) => c.toggleBold(), ["bold"]],
+                          ["Italic", <Italic size={13} />, (c) => c.toggleItalic(), ["italic"]],
+                          ["Bullet list", <List size={13} />, (c) => c.toggleBulletList(), ["bulletList"]],
+                          ["Numbered list", <span style={{ fontSize: 12, fontWeight: 700, width: 13, textAlign: "center" }}>1.</span>, (c) => c.toggleOrderedList(), ["orderedList"]],
+                          ["Checklist", <CheckSquare size={13} />, (c) => c.toggleTaskList(), ["taskList"]],
+                          ["Quote", <Quote size={13} />, (c) => c.toggleBlockquote(), ["blockquote"]],
+                          ["Code", <Code size={13} />, (c) => c.toggleCode(), ["code"]],
+                        ].map(([title, icon, run, active]) => (
+                          <button key={title} title={title} style={{ ...st.mdBtn, ...(extraActive(...active) ? st.mdBtnOn : {}) }}
+                            onMouseDown={(e) => e.preventDefault()} onClick={() => extraCmd(run)}>{icon}</button>
+                        ))}
+                        <button style={{ ...st.mdBtn, ...(extraActive("link") ? st.mdBtnOn : {}) }} title="Link"
+                          onMouseDown={(e) => e.preventDefault()}
+                          onClick={() => setExtraLinkDraft(extraLinkDraft !== null ? null
+                            : ((extraEdRef.current && extraEdRef.current.getAttributes("link").href) || ""))}>
+                          <LinkIcon size={13} />
+                        </button>
+                        <button style={st.mdBtn} title="Divider" onMouseDown={(e) => e.preventDefault()}
+                          onClick={() => extraCmd((c) => c.setHorizontalRule())}><Minus size={13} /></button>
+                        {(() => {
+                          const canUndo = !!(extraEdRef.current && extraEdRef.current.can().undo());
+                          return (
+                            <button style={{ ...st.undoBtn, marginLeft: "auto", ...(canUndo ? {} : st.undoBtnOff) }}
+                              title="Undo" disabled={!canUndo}
+                              onMouseDown={(e) => e.preventDefault()} onClick={() => extraCmd((c) => c.undo())}>
+                              <Undo2 size={12} /> Undo
+                            </button>
+                          );
+                        })()}
                       </div>
-                    )
+                      {extraLinkDraft !== null && (
+                        <div style={{ display: "flex", gap: 6, marginTop: 6 }}>
+                          <input autoFocus style={{ ...st.textIn, flex: 1 }} placeholder="Paste a link, then press Enter (empty removes it)"
+                            value={extraLinkDraft} onChange={(e) => setExtraLinkDraft(e.target.value)}
+                            onKeyDown={(e) => {
+                              if (e.key === "Enter") { e.preventDefault(); applyExtraLink(); }
+                              if (e.key === "Escape") { e.preventDefault(); setExtraLinkDraft(null); }
+                            }} />
+                          <button style={st.undoBtn} onClick={applyExtraLink}>Apply</button>
+                        </div>
+                      )}
+                      <div style={{ ...st.teachIn, marginTop: 6, minHeight: 220, resize: "none", cursor: "text" }}
+                        onMouseDown={(e) => {
+                          // clicking the empty space under the text still puts the cursor in the editor
+                          const ed = extraEdRef.current;
+                          if (ed && e.target === e.currentTarget) { e.preventDefault(); ed.commands.focus("end"); }
+                        }}>
+                        <MarkdownEditor key={undoEpoch} value={editor.extra || ""} onEditor={onExtraEditor}
+                          onChange={(md) => upd({ extra: md })}
+                          placeholder="Write more detail… Type # for a heading, - for a list, 1. for numbers" />
+                      </div>
+                    </>
                   )}
                 </div>
 
@@ -4972,6 +5025,7 @@ const st = {
   undoBtn: { display: "flex", alignItems: "center", gap: 4, height: 26, padding: "0 8px", fontSize: 11.5,
     border: `1px solid ${C.line}`, borderRadius: 6, background: C.raised, color: C.dim, cursor: "pointer", fontFamily: "inherit" },
   undoBtnOff: { opacity: 0.4, cursor: "default" },
+  mdBtnOn: { background: "rgba(124,160,232,0.18)", borderColor: C.work, color: C.text },
   moreIconRow: { display: "flex", gap: 4, flexWrap: "wrap", margin: "2px 0 4px" },
   morePopover: { position: "absolute", top: "calc(100% + 4px)", left: 0, zIndex: 20, minWidth: 240, maxWidth: 320,
     maxHeight: 280, overflowY: "auto", background: C.raised, border: `1px solid ${C.line}`, borderRadius: 10,

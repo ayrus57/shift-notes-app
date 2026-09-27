@@ -29,7 +29,14 @@ netlify.toml
 source/
   sift-notes-app.jsx    <- the actual React source of truth (single component, ~5300 lines)
   entry.jsx             <- tiny mount wrapper (createRoot + render), NOT part of the app component itself
+  package.json          <- build-time deps (TipTap editor, bundled INTO the app); react/react-dom/
+                           lucide-react are devDeps only so the preview can bundle them too
+preview/
+  sample-data.js        <- fake notes for the live preview only (never loaded by the live app)
 ```
+
+`package.json` lives in `source/` (not the repo root) on purpose: with one at
+the root, Netlify would start running `npm install` on every deploy.
 
 `sift-notes-app.jsx` has no mount code of its own — it's
 `export default function ShiftApp() {...}` with nothing calling
@@ -43,7 +50,8 @@ createRoot(document.getElementById("root")).render(<ShiftApp />);
 
 ## How to ship a change (every time)
 
-1. Edit `source/sift-notes-app.jsx` directly.
+1. Edit `source/sift-notes-app.jsx` directly. If `source/node_modules` is
+   missing (fresh session), run `npm ci` inside `source/` first.
 2. Build the bundle:
    ```
    esbuild source/entry.jsx --bundle --format=esm --target=es2020 --jsx=automatic --minify \
@@ -51,7 +59,10 @@ createRoot(document.getElementById("root")).render(<ShiftApp />);
      --outfile=/tmp/app.js
    ```
    (esbuild is globally installed; if missing, `npm i -g esbuild`.) A successful
-   build with no errors is a good sanity check before anything else.
+   build with no errors is a good sanity check before anything else. TipTap
+   is NOT external — it gets bundled in (~630 KB minified bundle); only
+   react, react-dom/client, react/jsx-runtime and lucide-react come from the
+   importmap. Don't add new externals without adding importmap entries.
 3. Splice the freshly built bundle into `index.html`, replacing only the
    contents of the existing `<script type="module">...</script>` block (the
    rest of `index.html` — importmap, manifest links, body markup — stays
@@ -78,10 +89,10 @@ URL after each draft change (pass it as `url` from a new session) and open it.
 
 How to build it: `esm.sh` (where `index.html`'s importmap loads React and
 lucide-react) is blocked both in cloud sessions and inside artifacts, so the
-preview must be fully self-contained. In the scratchpad, `npm i react@18.3.1
-react-dom@18.3.1 lucide-react@0.383.0`, copy `source/` in, and bundle
-`entry.jsx` with esbuild **without** the `--external` flags (add
-`--minify --define:process.env.NODE_ENV='"production"'`). Then write an HTML
+preview must be fully self-contained: bundle `source/entry.jsx` with esbuild
+**without** the `--external` flags (add
+`--minify --define:process.env.NODE_ENV='"production"'`); React etc. resolve
+from `source/node_modules` (devDependencies). Then write an HTML
 page with a `<title>Shift</title>`, the same `<style>` and boot/error script
 as `index.html`, a `#root` div, and the bundle inlined in a
 `<script type="module">`. Leave out `window.__SHIFT_CLOUD` so the preview
@@ -145,26 +156,34 @@ for that — the whole point of this repo is to avoid that.
   modal — browsers retarget that `click` event's target to the nearest
   common ancestor (the backdrop), so a naive `onClick={closeFn}` on the
   backdrop is NOT safe. Reuse this pattern for any new modal.
-- **Extra-description editor** (the long-form Markdown field) is a **plain,
-  standard Markdown textarea** while editing and the `Markdown` component's
-  rendered view otherwise (click the rendered view to edit; blurring the
-  textarea goes back to rendered). Toolbar buttons only insert standard
-  Markdown syntax at the cursor/selection via `extraEdit(fn)`; Enter on a
-  list line continues the list (`- `, `- [ ] `, `N. `, `> `), Enter on an
-  empty item ends it. Arash explicitly asked for this after the earlier
-  per-line WYSIWYG block editor (one `<textarea>` per line, hidden `#`/`N.`
-  markers, hand-rolled cross-line drag-select) kept producing bugs — **don't
-  bring back a custom per-line / WYSIWYG editor**; keep it a standard field.
-- **Undo buttons** in the description and extra-description fields use
-  `undoHist` / `undoField(field)`: an effect watches `editor.content` and
-  `editor.extra` and pushes the previous value, grouping edits less than
+- **Extra-description editor** is a **TipTap (v3) rich-text editor**
+  (`MarkdownEditor` component: `@tiptap/core` + StarterKit + TaskList/TaskItem
+  + Placeholder + the official `@tiptap/markdown` extension). It shows
+  headings/lists/checklists formatted while typing (Notion-style: typing
+  `# `, `1. `, `- `, `[ ] `, `> `, `**bold**` converts), but its value in
+  and out is **plain Markdown** (`contentType: "markdown"`,
+  `editor.getMarkdown()`), so storage, the card view's own `Markdown`
+  renderer, sync and the Claude connector all still deal in Markdown. The
+  toolbar calls TipTap commands on the instance handed up via `onEditor`;
+  Undo uses TipTap's own history. It's keyed on `undoEpoch` so it remounts
+  per opened note. The serializer writes blank lines between blocks and
+  backslash-escapes literal Markdown characters (e.g. `\[`), which
+  `mdInline` un-escapes for display.
+  History: Arash rejected both a hand-rolled per-line WYSIWYG editor (buggy
+  numbered lists and drag-select) and a plain Markdown textarea (headings
+  don't look like headings). **Don't hand-roll editor behavior** — use
+  TipTap's extensions/commands.
+- **Undo buttons**: the description field uses `undoHist` /
+  `undoField("content")`: an effect watches `editor.content` and pushes the
+  previous value, grouping edits less than
   `UNDO_GROUP_MS` apart into one step. History resets on every note open
   (`resetAux` bumps `undoEpoch`).
 
 ## Recent work log (most recent first)
 
-- Extra description is now a standard Markdown textarea (replaced the buggy
-  per-line block editor), and both description fields got Undo buttons.
+- Extra description is now a TipTap rich-text editor that stores Markdown
+  (replaced the buggy per-line block editor), and both description fields
+  got Undo buttons.
 - Threshold filters (Priority/Effort/Queue/Date) added next to Sort/Group.
 - Fixed: dragging out of a modal's borders no longer closes it (see overlay
   guard above) — applied to all 8 modals in the app, not just the note editor.
