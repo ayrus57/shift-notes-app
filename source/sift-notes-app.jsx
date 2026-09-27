@@ -2221,8 +2221,14 @@ export default function ShiftApp() {
   }, [extraLineSel]);
   useEffect(() => { setExtraLineSel(null); }, [editor && editor.id, extraEditing]);
   const extraLineMarker = (line) => {
-    const m = (line || "").match(/^(#{1,2})\s+(.*)$/);
-    return m ? { level: m[1].length, prefix: m[1] + " ", text: m[2] } : null;
+    const raw = line || "";
+    const h = raw.match(/^(#{1,2})\s+(.*)$/);
+    if (h) return { level: h[1].length, prefix: h[1] + " ", text: h[2] };
+    // Numbered-list rows: the "N. " is a fixed, non-editable label (like the heading's "#"),
+    // so the cursor can never land in front of the number and start typing there.
+    const n = raw.match(/^(\d+)\.\s(.*)$/);
+    if (n) return { level: 0, num: n[1], prefix: n[1] + ". ", text: n[2] };
+    return null;
   };
   const extraAutoResize = (el) => {
     if (!el) return;
@@ -4153,7 +4159,13 @@ export default function ShiftApp() {
                             const selected = extraLineSel && i >= extraLineSel.start && i <= extraLineSel.end;
                             return (
                               <div key={i} onMouseDown={() => extraLineMouseDown(i)}
-                                style={{ borderRadius: 4, background: selected ? C.work + "33" : "transparent" }}>
+                                style={{ borderRadius: 4, background: selected ? C.work + "33" : "transparent",
+                                  display: "flex", alignItems: "flex-start", gap: 6 }}>
+                                {marker && marker.num != null && (
+                                  <span style={{ flexShrink: 0, padding: "1px 0", fontSize: 12.5, color: C.dim, userSelect: "none" }}>
+                                    {marker.num}.
+                                  </span>
+                                )}
                                 <textarea rows={1}
                                   ref={(el) => { extraLineRefs.current[i] = el; if (el) extraAutoResize(el); }}
                                   value={marker ? marker.text : line}
