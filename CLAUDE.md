@@ -71,17 +71,23 @@ createRoot(document.getElementById("root")).render(<ShiftApp />);
 
 ### Previewing the app
 
-Arash wants to see a preview of Shift in the chat before a change goes live.
-In cloud sessions `esm.sh` (where `index.html`'s importmap loads React and
-lucide-react) is usually blocked, so the live `index.html` renders blank
-locally. Workaround: in the scratchpad, `npm i react@18.3.1 react-dom@18.3.1
-lucide-react@0.383.0`, bundle `source/entry.jsx` with esbuild **without** the
-`--external` flags (add `--define:process.env.NODE_ENV='"production"'`),
-make a copy of `index.html` with the importmap removed and the module script
-pointing at that bundle, serve it with `python3 -m http.server`, and take
-Playwright screenshots (desktop ~1400×900 and phone ~390×844). This preview
-copy is throwaway: never commit it. A fresh browser has empty local storage,
-so the preview shows an empty app, not his real notes.
+Arash wants a **live, clickable preview in the chat's side panel** (a
+published Artifact), not screenshots. His preview artifact is
+https://claude.ai/artifact/Sy3vFFDXMayC76wqgw5QH1 — republish to that same
+URL after each draft change (pass it as `url` from a new session) and open it.
+
+How to build it: `esm.sh` (where `index.html`'s importmap loads React and
+lucide-react) is blocked both in cloud sessions and inside artifacts, so the
+preview must be fully self-contained. In the scratchpad, `npm i react@18.3.1
+react-dom@18.3.1 lucide-react@0.383.0`, copy `source/` in, and bundle
+`entry.jsx` with esbuild **without** the `--external` flags (add
+`--minify --define:process.env.NODE_ENV='"production"'`). Then write an HTML
+page with a `<title>Shift</title>`, the same `<style>` and boot/error script
+as `index.html`, a `#root` div, and the bundle inlined in a
+`<script type="module">`. Leave out `window.__SHIFT_CLOUD` so the preview
+never touches his real Supabase data. The preview starts empty (no real
+notes); anything typed there stays only in that browser. This preview file
+is throwaway: never commit it.
 
 Never hand him raw files to upload manually again unless he explicitly asks
 for that — the whole point of this repo is to avoid that.
