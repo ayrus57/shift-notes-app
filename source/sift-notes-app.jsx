@@ -8,6 +8,7 @@ import {
   ChevronRight, User, UserPlus, Gauge, Repeat, CalendarClock, ArrowUpDown, Layers, Flag, Cloud,
   Siren, ArrowUp, ArrowDown, Rows, Columns, Paperclip, Upload,
   Heading1, Heading2, Bold, Italic, List, Quote, Code, Link as LinkIcon, Eye, EyeOff, Info, Copy, Undo2,
+  PanelLeftClose, PanelLeftOpen,
 } from "lucide-react";
 import { Editor as TiptapEditor, Extension } from "@tiptap/core";
 import StarterKit from "@tiptap/starter-kit";
@@ -1181,6 +1182,10 @@ export default function ShiftApp() {
   const [vw, setVw] = useState(typeof window !== "undefined" ? window.innerWidth : 1200);
   const [drawer, setDrawer] = useState(false);
   const narrow = vw < 900;
+  // Wide screens: the sidebar can be collapsed out of the way (remembered per device).
+  // Narrow screens ignore this and keep using the slide-in drawer instead.
+  const [sideCollapsed, setSideCollapsed] = useLocalValue("shift-side-collapsed", false);
+  const sideHidden = !narrow && sideCollapsed;
   const columnCount = vw <= 880 ? 1 : vw <= 1250 ? 2 : 3;
   const phone = vw < 560;
 
@@ -2338,7 +2343,7 @@ export default function ShiftApp() {
       `}</style>
 
       {narrow && drawer && <div style={st.scrim} onClick={() => setDrawer(false)} />}
-      <aside style={{ ...st.side,
+      <aside style={{ ...st.side, ...(sideHidden ? { display: "none" } : {}),
         ...(narrow ? { position: "fixed", left: 0, top: 0, bottom: 0, zIndex: 40,
           transform: drawer ? "translateX(0)" : "translateX(-100%)",
           transition: "transform 180ms ease", boxShadow: drawer ? "0 0 40px rgba(0,0,0,0.5)" : "none" } : {}) }}>
@@ -2347,7 +2352,15 @@ export default function ShiftApp() {
             <X size={16} />
           </button>
         )}
-        <div style={st.brand}><span style={st.mark}>◆</span><span style={st.brandName}>Shift</span></div>
+        <div style={st.brand}>
+          <span style={st.mark}>◆</span><span style={st.brandName}>Shift</span>
+          {!narrow && (
+            <button style={{ ...st.ghost, marginLeft: "auto" }} title="Collapse sidebar" aria-label="Collapse sidebar"
+              onClick={() => setSideCollapsed(true)}>
+              <PanelLeftClose size={16} />
+            </button>
+          )}
+        </div>
         <p style={st.tagline}>Your notes, filed your way.</p>
 
         <button style={st.newBtn} onClick={openNew}><Plus size={15} /> New note</button>
@@ -2619,6 +2632,11 @@ export default function ShiftApp() {
             {narrow && (
               <button style={st.hamburger} onClick={() => setDrawer(true)} title="Menu">
                 <Layers size={15} />
+              </button>
+            )}
+            {sideHidden && (
+              <button style={st.hamburger} onClick={() => setSideCollapsed(false)} title="Show sidebar" aria-label="Show sidebar">
+                <PanelLeftOpen size={15} />
               </button>
             )}
             <div style={{ ...st.searchBox, ...(narrow ? { width: "100%", flex: 1 } : {}) }}>

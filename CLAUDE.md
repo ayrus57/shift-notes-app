@@ -194,6 +194,9 @@ for that — the whole point of this repo is to avoid that.
 
 ## Recent work log (most recent first)
 
+- Sidebar collapse button (wide screens): `sideCollapsed` via
+  `useLocalValue("shift-side-collapsed")`; collapsed hides the `<aside>` and
+  shows a "Show sidebar" button in the header. Narrow screens keep the drawer.
 - Fixed the white "stroke" left on buttons after clicking, app-wide (real
   cause: `border` shorthand + toggled `borderColor`, see above; click focus
   rings were removed too).
