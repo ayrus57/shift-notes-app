@@ -33,6 +33,7 @@ source/
                            lucide-react are devDeps only so the preview can bundle them too
 preview/
   sample-data.js        <- fake notes for the live preview only (never loaded by the live app)
+  build-preview.sh      <- builds the self-contained preview page (see "Previewing the app")
 ```
 
 `package.json` lives in `source/` (not the repo root) on purpose: with one at
@@ -87,7 +88,9 @@ published Artifact), not screenshots. His preview artifact is
 https://claude.ai/artifact/Sy3vFFDXMayC76wqgw5QH1 — republish to that same
 URL after each draft change (pass it as `url` from a new session) and open it.
 
-How to build it: `esm.sh` (where `index.html`'s importmap loads React and
+**Quick way:** `sh preview/build-preview.sh <scratchpad>/shift-preview.html`, then
+publish that file to the artifact URL above and open it. What the script does,
+for reference: `esm.sh` (where `index.html`'s importmap loads React and
 lucide-react) is blocked both in cloud sessions and inside artifacts, so the
 preview must be fully self-contained: bundle `source/entry.jsx` with esbuild
 **without** the `--external` flags (add
@@ -118,6 +121,55 @@ timestamp; set both `triggers` and legacy `trigger` (= `triggers[0]`).
 
 Never hand him raw files to upload manually again unless he explicitly asks
 for that — the whole point of this repo is to avoid that.
+
+## Connections and where everything lives
+
+| Thing | Where | Notes |
+|---|---|---|
+| Code | GitHub `ayrus57/shift-notes-app` | Default branch `main` = live site. |
+| Live site | Netlify, **https://shift-me.netlify.app** | Git auto-deploy from `main`. Settings in `netlify.toml` (manifest/sw/index cache headers). Claude needs no Netlify access: merging to `main` is the deploy. |
+| Data | Supabase project `fvxnrhomkaybmasecuus` (Tokyo) | URL `https://fvxnrhomkaybmasecuus.supabase.co`. The **publishable** key is in `index.html` (`window.__SHIFT_CLOUD`); it's public by design, protected by RLS. Never put the service-role key in the repo. |
+| Tables | `public.shift_kv` (user_id, key, value text JSON, updated_at; PK user_id+key) | One row per synced key: `sift-notes`, `sift-types`, `sift-categories`, `sift-labels`, `sift-places`, `sift-contacts`, `sift-discover`, `sift-custom-triggers`, `sift-claude-memory`, `sift-routine-kinds`, `sift-sections`, `sift-people-groups`. |
+| | `shift_mcp_tokens` (token_hash sha256, user_id, label, revoked) | Access tokens for the Claude connector. Only hashes are stored; a lost token can't be recovered. To issue a new one: generate a random string, insert its sha256 hex with Arash's user_id (via Supabase SQL), give him the plain string once. |
+| | `shift_mcp_log`, `shift_mcp_pending` | Connector write log; pending `propose_edit` patches awaiting `confirm_edit`. |
+| Storage | bucket `shift-files` | Note images/attachments, path `<user_id>/<note_id>/...`. (An old public `app` bucket served the app before Netlify.) |
+| Edge function `mcp` | `.../functions/v1/mcp` | **The "Shift" Claude connector** (list_notes, get_note, get_structure, create_note, propose_edit/confirm_edit, add_to_structure, link_notes, add_attachment, remember_preference, set_relation/clear_relation, recent_activity). Auth: `Authorization: Bearer <token>` or `?t=<token>`. verify_jwt off. Hardcoded TYPES/QUEUES/STATUSES must stay in sync with the app. |
+| Edge function `link-preview` | `.../functions/v1/link-preview?url=` | Fetches Open Graph tags for link cards (no auth, public URLs only). |
+| Edge functions `shift`, `clane` | | Legacy: `shift` served the app from the `app` bucket before Netlify; `clane` is a retired 410 stub. Safe to ignore. |
+
+Edge-function source code is **not in this repo**; it lives only in Supabase.
+Read it with the Supabase connector (`get_edge_function`) before changing it,
+and deploy with `deploy_edge_function`.
+
+**Connectors a Claude Code session needs** (set up in claude.ai Settings ->
+Connectors, or the CLI's MCP config): **GitHub** (repo access; the Claude
+GitHub App must be installed on `ayrus57/shift-notes-app`), **Supabase**
+(for data, functions, logs) and optionally **Shift** (the app's own connector,
+URL above + token) for working with real notes. Netlify needs no connector.
+
+## Setting up in a new place (checklist for Claude)
+
+1. Clone `ayrus57/shift-notes-app` and check out the newest work branch (see
+   "Current state" below), not just `main`.
+2. `npm i -g esbuild` if missing; `cd source && npm ci`.
+3. Build once (step 2 of "How to ship") to confirm it compiles.
+4. Build the preview with `sh preview/build-preview.sh`, publish it to the
+   preview artifact URL (pass `url`) and open it.
+5. Confirm GitHub push works to a `claude/...` branch. Pushing to `main` may
+   be blocked by the environment's safety rules; the normal path is a pull
+   request that Arash merges himself on GitHub (he likes doing this; it's
+   how he's learning GitHub).
+
+## Current state (update this whenever it changes)
+
+- PR https://github.com/ayrus57/shift-notes-app/pull/2 (branch
+  `claude/fervent-archimedes-nrqf2x`) was **open, not merged** at the time of
+  the move: Undo buttons, TipTap extra description, focus-ring removal,
+  white-border fix, and the sidebar collapse button, plus `preview/` and
+  `source/package.json`. Check whether it has been merged before starting
+  new work; if it has, start a fresh branch from `main`.
+- Arash's latest standing rule: **don't push anything to GitHub until he
+  says so**; show changes in the preview artifact first.
 
 ## App architecture notes (things that aren't obvious from a quick read)
 
