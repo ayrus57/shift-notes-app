@@ -85,8 +85,11 @@ createRoot(document.getElementById("root")).render(<ShiftApp />);
 
 Arash wants a **live, clickable preview in the chat's side panel** (a
 published Artifact), not screenshots. His preview artifact is
-https://claude.ai/artifact/Sy3vFFDXMayC76wqgw5QH1 — republish to that same
+https://claude.ai/artifact/LhtbmjF6oT6FFMkhnUUpEn — republish to that same
 URL after each draft change (pass it as `url` from a new session) and open it.
+(The older one, `Sy3vFFDXMayC76wqgw5QH1`, can't be opened from the account
+Claude Code now runs under. If the link above ever reads "not found" in a new
+setup, publish a new preview, tell Arash the new link, and update it here.)
 
 **Quick way:** `sh preview/build-preview.sh <scratchpad>/shift-preview.html`, then
 publish that file to the artifact URL above and open it. What the script does,
@@ -154,7 +157,8 @@ URL above + token) for working with real notes. Netlify needs no connector.
 2. `npm i -g esbuild` if missing; `cd source && npm ci`.
 3. Build once (step 2 of "How to ship") to confirm it compiles.
 4. Build the preview with `sh preview/build-preview.sh`, publish it to the
-   preview artifact URL (pass `url`) and open it.
+   preview artifact URL (pass `url`) and open it. If that URL reads "not
+   found", publish a new one and update the link in "Previewing the app".
 5. Confirm GitHub push works to a `claude/...` branch. Pushing to `main` may
    be blocked by the environment's safety rules; the normal path is a pull
    request that Arash merges himself on GitHub (he likes doing this; it's
