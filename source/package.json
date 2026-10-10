@@ -1,0 +1,18 @@
+{
+  "name": "shift-source",
+  "private": true,
+  "description": "Build-time dependencies for Shift. Only esbuild reads these; the live site loads React and lucide-react from esm.sh (see index.html's importmap).",
+  "dependencies": {
+    "@tiptap/core": "3.31.3",
+    "@tiptap/pm": "3.31.3",
+    "@tiptap/starter-kit": "3.31.3",
+    "@tiptap/markdown": "3.31.3",
+    "@tiptap/extension-list": "3.31.3",
+    "@tiptap/extensions": "3.31.3"
+  },
+  "devDependencies": {
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "lucide-react": "0.383.0"
+  }
+}
